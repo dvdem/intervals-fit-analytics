@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints
+
+# Variables de entorno y credenciales
+.env
+.gmail_smtp_credential.xml
+
+# Entornos virtuales
+.venv/
+env/
+venv/
+
+# Archivos de salida generados
+output/
+scratch/
+
+# Archivos grandes o binarios innecesarios
+*.zip
+*.fit
+*.exe
+*.winmd
+*.pem
+
+# Certificados SSL
+fmt_system_ca.pem
