@@ -304,6 +304,35 @@ def procesar_telemetria_ciclista(
     df_gps['fc_smooth_60s'] = df_gps['fc'].astype(float).rolling(window=60, min_periods=1, center=True).mean()
     df_gps['velocidad_smooth_60s'] = df_gps['velocidad_kmh'].astype(float).rolling(window=60, min_periods=1, center=True).mean()
 
+    # --- Cálculo de CdA Virtual ---
+    peso_total = max(30.0, peso) + 8.5  # Asumimos 8.5kg de bici por defecto
+    g_const = 9.81
+    rho_const = 1.225
+    crr_const = 0.005
+    eficiencia_transmision = 0.97
+
+    v_ms = df_gps['velocidad_smooth_60s'] / 3.6
+    # Aceleración (delta_v / delta_t)
+    if 'timestamp' in df_gps.columns:
+        dt_sec = df_gps['timestamp'].diff().dt.total_seconds().fillna(1.0).clip(lower=0.1)
+    else:
+        dt_sec = pd.Series(1.0, index=df_gps.index)
+    df_gps['aceleracion'] = (v_ms.diff() / dt_sec).fillna(0.0)
+
+    theta_rad = np.arctan(df_gps['pendiente'] / 100.0)
+    p_grav = peso_total * g_const * np.sin(theta_rad) * v_ms
+    p_rodadura = peso_total * g_const * crr_const * np.cos(theta_rad) * v_ms
+    p_inercia = peso_total * df_gps['aceleracion'] * v_ms
+
+    p_aero = (df_gps['potencia_smooth_60s'] * eficiencia_transmision) - p_grav - p_rodadura - p_inercia
+    denominador_aero = 0.5 * rho_const * (v_ms ** 3)
+    denominador_seguro = np.where(denominador_aero > 5.0, denominador_aero, np.nan)  # Filtrar ruido a bajas velocidades
+    
+    df_gps['cda_virtual'] = (p_aero / denominador_seguro).clip(lower=0.15, upper=0.8).fillna(0.0)
+    # Suavizar el CdA
+    df_gps['cda_smooth'] = df_gps['cda_virtual'].replace(0.0, np.nan).interpolate(limit_direction='both').rolling(window=30, min_periods=1, center=True).mean().fillna(0.0)
+    # ------------------------------
+
     # Interpolación en rejilla uniforme de distancia (Sincronización espacial)
     dists_km_arr = (df_gps['distancia'].values / 1000.0).clip(min=0.0)
 
@@ -319,6 +348,7 @@ def procesar_telemetria_ciclista(
     hr_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['fc_smooth_60s'].values)
     cad_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['cadencia'].values)
     grad_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['pendiente'].values)
+    cda_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['cda_smooth'].values)
     t_by_dist = np.interp(grid_dist, dists_km_arr, t_mov_sec_arr)
 
     samples_by_dist = []
@@ -342,6 +372,7 @@ def procesar_telemetria_ciclista(
             'hr': int(round(float(hr_by_dist[i]))),
             'cad': int(round(float(cad_by_dist[i]))),
             'grad': round(float(grad_by_dist[i]), 1),
+            'cda': round(float(cda_by_dist[i]), 3),
             't_sec': t_val,
             't_str': str(timedelta(seconds=t_val))
         })
@@ -358,6 +389,7 @@ def procesar_telemetria_ciclista(
     hr_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['fc_smooth_60s'].values)
     cad_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['cadencia'].values)
     grad_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['pendiente'].values)
+    cda_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['cda_smooth'].values)
 
     samples_by_time = []
     for i in range(num_grid_points):
@@ -382,6 +414,7 @@ def procesar_telemetria_ciclista(
             'hr': int(round(float(hr_by_time[i]))),
             'cad': int(round(float(cad_by_time[i]))),
             'grad': round(float(grad_by_time[i]), 1),
+            'cda': round(float(cda_by_time[i]), 3),
         })
 
     return {
@@ -2495,6 +2528,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <button class="tab-btn" data-metric="kjkg">kJ / kg</button>
                     <button class="tab-btn" data-metric="kjkg_h">kJ / kg / h</button>
                     <button class="tab-btn" data-metric="hr">Pulso</button>
+                    <button class="tab-btn" data-metric="cda">CdA (m²)</button>
                 </div>
                 <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
                     <div style="font-size: 0.78rem; color: var(--text-muted); background: var(--bg-panel-solid); padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border-subtle); display: inline-flex; align-items: center; gap: 6px;">
@@ -2598,7 +2632,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="segment-kpis-grid" id="segmentKpisGrid"></div>
 
         <!-- 5. Mini Gráfico Comparativo del Segmento -->
-        <!--div class="segment-chart-wrapper">
+        <!-- 5. Mini Gráfico Comparativo del Segmento -->
+        <div class="segment-chart-wrapper">
             <div class="segment-chart-header">
                 <div class="viz-title" style="font-size: 0.95rem;">
                     <i data-lucide="bar-chart-3" style="color: #38bdf8;"></i>
@@ -2615,7 +2650,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="chart-wrapper" style="min-height: 260px;">
                 <canvas id="segmentBarChart"></canvas>
             </div>
-        </div-->
+        </div>
 
         <!-- 6. Tabla Clasificación y Métricas del Segmento -->
         <div class="viz-title" style="font-size: 0.95rem; margin-bottom: 12px;">
@@ -2638,6 +2673,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <th>Trabajo Tramo</th>
                         <th>FC Media / Máx</th>
                         <th>Cadencia</th>
+                        <th>CdA Prom.</th>
                     </tr>
                 </thead>
                 <tbody id="segmentTableBody">
@@ -4091,6 +4127,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 let spdSum = 0;
                 let kjIni = 0;
                 let kjFin = 0;
+                let cdaSum = 0;
+                let cdaCount = 0;
 
                 if (samplesInSeg.length >= 2) {
                     const ptStart = samplesInSeg[0];
@@ -4112,6 +4150,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             cadSum += pt.cad;
                             cadCount++;
                         }
+                        if (pt.cda > 0.1 && pt.cda < 0.8 && pt.pwr > 30 && (pt.spd || 0) > 15) {
+                            cdaSum += pt.cda;
+                            cdaCount++;
+                        }
                     });
                 } else {
                     const ptIni = interpolateRiderAtKm(series, startKm);
@@ -4127,6 +4169,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     hrMax = Math.max(ptIni.hr, ptFin.hr);
                     if (ptIni.cad > 10) { cadSum += ptIni.cad; cadCount++; }
                     if (ptFin.cad > 10) { cadSum += ptFin.cad; cadCount++; }
+                    if (ptIni.cda > 0) { cdaSum += ptIni.cda; cdaCount++; }
+                    if (ptFin.cda > 0) { cdaSum += ptFin.cda; cdaCount++; }
                 }
 
                 const count = Math.max(1, pwrVals.length);
@@ -4134,6 +4178,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const wkgMedia = parseFloat((potMedia / peso).toFixed(2));
                 const horasSeg = duracionSeg / 3600.0;
                 const velMedia = parseFloat((distSegmento / Math.max(0.001, horasSeg)).toFixed(1));
+                const cdaMedia = cdaCount > 0 ? parseFloat((cdaSum / cdaCount).toFixed(3)) : 0.0;
 
                 // Potencia Normalizada (NP)
                 let npSeg = potMedia;
@@ -4194,7 +4239,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     kj_kg_h: kjKgH,
                     fc_media: fcMedia,
                     fc_max: hrMax,
-                    cad_media: cadMedia
+                    cad_media: cadMedia,
+                    cda_media: cdaMedia
                 });
             });
 
@@ -4255,7 +4301,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 hr: Math.round(p1.hr + ratio * (p2.hr - p1.hr)),
                 cad: Math.round(p1.cad + ratio * (p2.cad - p1.cad)),
                 kj: Math.round(p1.kj + ratio * (p2.kj - p1.kj)),
-                alt: Math.round(p1.alt + ratio * (p2.alt - p1.alt))
+                alt: Math.round(p1.alt + ratio * (p2.alt - p1.alt)),
+                cda: parseFloat(((p1.cda || 0) + ratio * ((p2.cda || 0) - (p1.cda || 0))).toFixed(3))
             };
         }
 
@@ -4385,6 +4432,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </td>
                     <td>${r.fc_media > 0 ? r.fc_media + ' bpm' : '--'} <span style="font-size: 0.72rem; color: var(--text-muted);">${r.fc_max > 0 ? '(Máx ' + r.fc_max + ')' : ''}</span></td>
                     <td>${r.cad_media > 0 ? r.cad_media + ' rpm' : '--'}</td>
+                    <td><strong style="color: #10b981;">${r.cda_media > 0 ? r.cda_media + ' m²' : '--'}</strong></td>
                 `;
                 tbody.appendChild(tr);
             });
@@ -4457,6 +4505,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 dataVals = riders.map(r => r.vel_media_kmh);
                 yUnit = ' km/h';
                 yTitle = 'Velocidad Media (km/h)';
+            } else if (metric === 'cda') {
+                dataVals = riders.map(r => r.cda_media);
+                yUnit = ' m²';
+                yTitle = 'CdA Medio (m²)';
             }
 
             segmentBarChart.data.labels = labels;
@@ -4668,7 +4720,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                     else if (activeMetric === 'kjkg') unit = ' kJ/kg';
                                     else if (activeMetric === 'kjkg_h') unit = ' kJ/kg/h';
                                     else if (activeMetric === 'hr') unit = ' bpm';
-                                    return `${item.dataset.label}: ${item.raw.y}${unit}`;
+                                    else if (activeMetric === 'cda') unit = ' m²';
+                                    const formattedVal = (activeMetric === 'cda' && item.raw && item.raw.y !== undefined) ? Number(item.raw.y).toFixed(3) : item.raw.y;
+                                    return `${item.dataset.label}: ${formattedVal}${unit}`;
                                 }
                             }
                         }
@@ -4698,9 +4752,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             else if (activeMetric === 'kjkg') unit = ' kJ/kg';
             else if (activeMetric === 'kjkg_h') unit = ' kJ/kg/h';
             else if (activeMetric === 'hr') unit = ' bpm';
+            else if (activeMetric === 'cda') unit = ' m²';
 
             if (telemetryChart.options && telemetryChart.options.scales && telemetryChart.options.scales.yMetric) {
-                telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${v}${unit}`;
+                if (activeMetric === 'cda') {
+                    telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(3)}${unit}`;
+                    telemetryChart.options.scales.yMetric.suggestedMin = 0.15;
+                    telemetryChart.options.scales.yMetric.suggestedMax = 0.60;
+                } else {
+                    telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${v}${unit}`;
+                    delete telemetryChart.options.scales.yMetric.suggestedMin;
+                    delete telemetryChart.options.scales.yMetric.suggestedMax;
+                }
             }
 
             const numCiclistas = DATA.ciclistas.length;
@@ -4716,6 +4779,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg') val = s.kj_kg;
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
+                    else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
                     return { x: s.d_km, y: val };
                 });
 
@@ -4730,6 +4794,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg') val = s.kj_kg;
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
+                    else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
                     pointDs.data = [{ x: s.d_km, y: val }];
                 }
             });
@@ -4783,6 +4848,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg') val = s.kj_kg;
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
+                    else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
                     telemetryChart.data.datasets[1 + numCiclistas + idx].data = [{ x: s.d_km, y: val }];
                 }
             });
