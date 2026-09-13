@@ -32,6 +32,13 @@ from config import (
 from src.intervals_api import IntervalsClient
 from src.fit_analyzer import cargar_fit, cargar_fit_con_tiempo_movimiento
 from src.pdf_reports import generar_informe_etapa_pdf
+from src.weather_service import (
+    calcular_rho_preciso,
+    calcular_bearing_ciclista,
+    calcular_viento_efectivo,
+    obtener_clima_open_meteo,
+    deg_to_cardinal,
+)
 
 # Paleta de colores distintiva para ciclistas (estilo Pro Cycling)
 COLORES_CICLISTAS = [
@@ -76,7 +83,8 @@ def procesar_telemetria_ciclista(
     atleta_id: str = "",
     ftp: float = 380.0,
     num_grid_points: int = 1000,
-    dist_referencia_km: Optional[float] = None
+    dist_referencia_km: Optional[float] = None,
+    clima_info: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Procesa y limpia la telemetría de un ciclista, calculando métricas acumuladas,
@@ -240,6 +248,8 @@ def procesar_telemetria_ciclista(
         'glow': color_cfg['glow'],
         'badge': color_cfg['badge'],
         'num_puntos': len(df_gps),
+        'temp_media_c': round(float(df_gps['temperatura'].mean()), 1) if 'temperatura' in df_gps.columns and df_gps['temperatura'].notna().any() else None,
+        'temp_max_c': round(float(df_gps['temperatura'].max()), 1) if 'temperatura' in df_gps.columns and df_gps['temperatura'].notna().any() else None,
     }
 
     # Desglose horario de gasto energético y ritmo sobre tiempo en movimiento (Hourly Energy Breakdown)
@@ -304,14 +314,64 @@ def procesar_telemetria_ciclista(
     df_gps['fc_smooth_60s'] = df_gps['fc'].astype(float).rolling(window=60, min_periods=1, center=True).mean()
     df_gps['velocidad_smooth_60s'] = df_gps['velocidad_kmh'].astype(float).rolling(window=60, min_periods=1, center=True).mean()
 
-    # --- Cálculo de CdA Virtual ---
+    # --- Cálculo de CdA Virtual con densidad del aire dinámica y viento efectivo ---
     peso_total = max(30.0, peso) + 8.5  # Asumimos 8.5kg de bici por defecto
     g_const = 9.81
-    rho_const = 1.225
     crr_const = 0.005
     eficiencia_transmision = 0.97
 
-    v_ms = df_gps['velocidad_smooth_60s'] / 3.6
+    # 1. Temperatura: del sensor del FIT (campo 'temperatura'), con fallback a Open-Meteo o 20°C
+    fallback_temp = float(clima_info.get('temp_media_c', 20.0)) if clima_info else 20.0
+    if 'temperatura' in df_gps.columns and df_gps['temperatura'].notna().any():
+        temp_celsius = df_gps['temperatura'].astype(float).fillna(fallback_temp).rolling(window=60, min_periods=1, center=True).mean()
+    else:
+        temp_celsius = pd.Series(fallback_temp, index=df_gps.index)
+    df_gps['temp_smooth'] = temp_celsius
+
+    # 2. Densidad del aire precisa con formulación de Buck (humedad + presión de superficie)
+    alt_m = df_gps['altitud'].fillna(0.0).clip(lower=0.0)
+    clima_hum = float(clima_info.get('humedad_media_pct', 50.0)) if clima_info else 50.0
+    clima_pres_hpa = clima_info.get('presion_media_hpa') if clima_info else None
+    presion_pa_ext = (float(clima_pres_hpa) * 100.0) if clima_pres_hpa else None
+
+    rho_series = calcular_rho_preciso(
+        temperatura_c=temp_celsius,
+        altitud_m=alt_m,
+        humedad_rel_pct=clima_hum,
+        presion_pa=presion_pa_ext
+    )
+    if isinstance(rho_series, (float, int)):
+        rho_series = pd.Series(float(rho_series), index=df_gps.index)
+    df_gps['rho'] = rho_series
+
+    # 3. Rumbo (bearing) del ciclista y proyección del viento
+    bearing_arr = calcular_bearing_ciclista(df_gps['lat'].values, df_gps['lon'].values)
+    df_gps['bearing_deg'] = bearing_arr
+
+    v_ms = (df_gps['velocidad_smooth_60s'] / 3.6).clip(lower=0.0)
+
+    wind_speed_ms = float(clima_info.get('viento_media_ms', 0.0)) if clima_info else 0.0
+    wind_dir_deg = float(clima_info.get('viento_dir_deg', 0.0)) if clima_info else 0.0
+
+    if wind_speed_ms > 0.1:
+        viento_dict = calcular_viento_efectivo(
+            v_bici_ms=v_ms.values,
+            bearing_ciclista_deg=bearing_arr,
+            wind_speed_ms=wind_speed_ms,
+            wind_direction_deg=wind_dir_deg
+        )
+        v_headwind_kmh = pd.Series(viento_dict['v_headwind_ms'] * 3.6, index=df_gps.index).rolling(window=30, min_periods=1, center=True).mean()
+        v_air_ms = pd.Series(viento_dict['v_air_ms'], index=df_gps.index).rolling(window=30, min_periods=1, center=True).mean()
+        yaw_deg = pd.Series(viento_dict['yaw_deg'], index=df_gps.index).rolling(window=30, min_periods=1, center=True).mean()
+    else:
+        v_headwind_kmh = pd.Series(0.0, index=df_gps.index)
+        v_air_ms = v_ms
+        yaw_deg = pd.Series(0.0, index=df_gps.index)
+
+    df_gps['v_headwind_kmh'] = v_headwind_kmh
+    df_gps['v_air_ms'] = v_air_ms
+    df_gps['yaw_deg'] = yaw_deg
+
     # Aceleración (delta_v / delta_t)
     if 'timestamp' in df_gps.columns:
         dt_sec = df_gps['timestamp'].diff().dt.total_seconds().fillna(1.0).clip(lower=0.1)
@@ -325,12 +385,18 @@ def procesar_telemetria_ciclista(
     p_inercia = peso_total * df_gps['aceleracion'] * v_ms
 
     p_aero = (df_gps['potencia_smooth_60s'] * eficiencia_transmision) - p_grav - p_rodadura - p_inercia
-    denominador_aero = 0.5 * rho_const * (v_ms ** 3)
-    denominador_seguro = np.where(denominador_aero > 5.0, denominador_aero, np.nan)  # Filtrar ruido a bajas velocidades
+    # Potencia aerodinámica: P_aero = 0.5 * rho * CdA * (v_air^2) * v_ground
+    denominador_aero = 0.5 * rho_series * (v_air_ms ** 2) * v_ms
+    denominador_seguro = np.where((denominador_aero > 5.0) & (v_ms > 4.0), denominador_aero, np.nan)  # Filtrar ruido a bajas velocidades (< 14 km/h)
     
     df_gps['cda_virtual'] = (p_aero / denominador_seguro).clip(lower=0.15, upper=0.8).fillna(0.0)
     # Suavizar el CdA
     df_gps['cda_smooth'] = df_gps['cda_virtual'].replace(0.0, np.nan).interpolate(limit_direction='both').rolling(window=30, min_periods=1, center=True).mean().fillna(0.0)
+    # Anotar densidad del aire media y viento en stats para contexto
+    stats['rho_media'] = round(float(rho_series.mean()), 4)
+    if clima_info:
+        stats['viento_etapa_kmh'] = clima_info.get('viento_media_kmh', 0.0)
+        stats['viento_dir_cardinal'] = clima_info.get('viento_cardinal', '--')
     # ------------------------------
 
     # Interpolación en rejilla uniforme de distancia (Sincronización espacial)
@@ -349,6 +415,10 @@ def procesar_telemetria_ciclista(
     cad_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['cadencia'].values)
     grad_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['pendiente'].values)
     cda_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['cda_smooth'].values)
+    temp_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['temp_smooth'].values)
+    headwind_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['v_headwind_kmh'].values)
+    vair_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['v_air_ms'].values)
+    yaw_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['yaw_deg'].values)
     t_by_dist = np.interp(grid_dist, dists_km_arr, t_mov_sec_arr)
 
     samples_by_dist = []
@@ -373,6 +443,10 @@ def procesar_telemetria_ciclista(
             'cad': int(round(float(cad_by_dist[i]))),
             'grad': round(float(grad_by_dist[i]), 1),
             'cda': round(float(cda_by_dist[i]), 3),
+            'temp': round(float(temp_by_dist[i]), 1),
+            'headwind': round(float(headwind_by_dist[i]), 1),
+            'v_air': round(float(vair_by_dist[i] * 3.6), 1),
+            'yaw': round(float(yaw_by_dist[i]), 1),
             't_sec': t_val,
             't_str': str(timedelta(seconds=t_val))
         })
@@ -390,6 +464,10 @@ def procesar_telemetria_ciclista(
     cad_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['cadencia'].values)
     grad_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['pendiente'].values)
     cda_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['cda_smooth'].values)
+    temp_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['temp_smooth'].values)
+    headwind_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['v_headwind_kmh'].values)
+    vair_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['v_air_ms'].values)
+    yaw_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['yaw_deg'].values)
 
     samples_by_time = []
     for i in range(num_grid_points):
@@ -415,6 +493,10 @@ def procesar_telemetria_ciclista(
             'cad': int(round(float(cad_by_time[i]))),
             'grad': round(float(grad_by_time[i]), 1),
             'cda': round(float(cda_by_time[i]), 3),
+            'temp': round(float(temp_by_time[i]), 1),
+            'headwind': round(float(headwind_by_time[i]), 1),
+            'v_air': round(float(vair_by_time[i] * 3.6), 1),
+            'yaw': round(float(yaw_by_time[i]), 1),
         })
 
     return {
@@ -2430,6 +2512,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="badge"><i data-lucide="trending-up"></i> +__DESNIVEL_POS_M__ m D+</div>
             <div class="badge"><i data-lucide="mountain"></i> Máx __ALTITUD_MAX__ m</div>
             <div class="badge"><i data-lucide="users"></i> __NUM_CICLISTAS__ Ciclistas</div>
+            __WEATHER_BADGE_HTML__
         </div>
     </header>
       <!-- Tabla Resumen -->
@@ -2529,6 +2612,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <button class="tab-btn" data-metric="kjkg_h">kJ / kg / h</button>
                     <button class="tab-btn" data-metric="hr">Pulso</button>
                     <button class="tab-btn" data-metric="cda">CdA (m²)</button>
+                    <!--button class="tab-btn" data-metric="temp">Temperatura (°C)</button>
+                    <button class="tab-btn" data-metric="headwind">Viento Efectivo (km/h)</button-->
                 </div>
                 <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
                     <div style="font-size: 0.78rem; color: var(--text-muted); background: var(--bg-panel-solid); padding: 5px 12px; border-radius: 8px; border: 1px solid var(--border-subtle); display: inline-flex; align-items: center; gap: 6px;">
@@ -2562,10 +2647,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
             </div>
             <div class="segment-actions">
-                <button class="btn-ctrl primary" id="btnSimulateSegment">
+                <!--button class="btn-ctrl primary" id="btnSimulateSegment">
                     <i data-lucide="play-circle"></i>
                     <span>Simular este Tramo</span>
-                </button>
+                </button-->
                 <button class="btn-ctrl" id="btnResetSegment">
                     <i data-lucide="rotate-ccw"></i>
                     <span>Etapa Completa</span>
@@ -2633,7 +2718,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <!-- 5. Mini Gráfico Comparativo del Segmento -->
         <!-- 5. Mini Gráfico Comparativo del Segmento -->
-        <div class="segment-chart-wrapper">
+        <!--div class="segment-chart-wrapper">
             <div class="segment-chart-header">
                 <div class="viz-title" style="font-size: 0.95rem;">
                     <i data-lucide="bar-chart-3" style="color: #38bdf8;"></i>
@@ -2650,7 +2735,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="chart-wrapper" style="min-height: 260px;">
                 <canvas id="segmentBarChart"></canvas>
             </div>
-        </div>
+        </div-->
 
         <!-- 6. Tabla Clasificación y Métricas del Segmento -->
         <div class="viz-title" style="font-size: 0.95rem; margin-bottom: 12px;">
@@ -2903,7 +2988,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             <div>
                                 <div class="rider-name">${s.nombre}</div>
                                 <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
-                                    ${s.peso_kg} kg • FTP ${s.ftp_w} W • <span style="color: #ec4899; font-weight: 600;">NP ${s.np_w} W</span> (IF ${s.if_val}) • <span style="color: #a855f7; font-weight: 600;">${s.tss_total} TSS</span> (${s.tss_hora}/h) • <span style="color: #06b6d4; font-weight: 600;">${kjKgH} kJ/kg/h</span>
+                                    ${s.peso_kg} kg • FTP ${s.ftp_w} W • <span style="color: #ec4899; font-weight: 600;">NP ${s.np_w} W</span> (IF ${s.if_val}) • <span style="color: #a855f7; font-weight: 600;">${s.tss_total} TSS</span> (${s.tss_hora}/h) • <span style="color: #06b6d4; font-weight: 600;">${kjKgH} kJ/kg/h</span>${s.temp_media_c !== null && s.temp_media_c !== undefined ? ` • <span style="color: #f97316; font-weight: 600;" title="Temperatura media FIT y densidad del aire estimada">🌡️ ${s.temp_media_c}°C (ρ: ${s.rho_media || '--'} kg/m³)</span>` : ''}
                                 </div>
                             </div>
                         </div>
@@ -4721,7 +4806,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                     else if (activeMetric === 'kjkg_h') unit = ' kJ/kg/h';
                                     else if (activeMetric === 'hr') unit = ' bpm';
                                     else if (activeMetric === 'cda') unit = ' m²';
-                                    const formattedVal = (activeMetric === 'cda' && item.raw && item.raw.y !== undefined) ? Number(item.raw.y).toFixed(3) : item.raw.y;
+                                    else if (activeMetric === 'temp') unit = ' °C';
+                                    else if (activeMetric === 'headwind') unit = ' km/h';
+
+                                    let formattedVal = item.raw.y;
+                                    if (activeMetric === 'cda' && item.raw && item.raw.y !== undefined) {
+                                        formattedVal = Number(item.raw.y).toFixed(3);
+                                    } else if (activeMetric === 'temp' && item.raw && item.raw.y !== undefined) {
+                                        formattedVal = Number(item.raw.y).toFixed(1);
+                                    } else if (activeMetric === 'headwind' && item.raw && item.raw.y !== undefined) {
+                                        const hw = Number(item.raw.y);
+                                        const tipo = hw > 0.5 ? ' (Contra)' : (hw < -0.5 ? ' (Cola)' : ' (Neutro)');
+                                        return `${item.dataset.label}: ${hw > 0 ? '+' : ''}${hw.toFixed(1)} km/h${tipo}`;
+                                    }
                                     return `${item.dataset.label}: ${formattedVal}${unit}`;
                                 }
                             }
@@ -4753,12 +4850,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             else if (activeMetric === 'kjkg_h') unit = ' kJ/kg/h';
             else if (activeMetric === 'hr') unit = ' bpm';
             else if (activeMetric === 'cda') unit = ' m²';
+            else if (activeMetric === 'temp') unit = ' °C';
+            else if (activeMetric === 'headwind') unit = ' km/h';
 
             if (telemetryChart.options && telemetryChart.options.scales && telemetryChart.options.scales.yMetric) {
                 if (activeMetric === 'cda') {
                     telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(3)}${unit}`;
                     telemetryChart.options.scales.yMetric.suggestedMin = 0.15;
                     telemetryChart.options.scales.yMetric.suggestedMax = 0.60;
+                } else if (activeMetric === 'temp') {
+                    telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(1)}${unit}`;
+                    telemetryChart.options.scales.yMetric.suggestedMin = 15;
+                    telemetryChart.options.scales.yMetric.suggestedMax = 35;
+                } else if (activeMetric === 'headwind') {
+                    telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${v > 0 ? '+' : ''}${Number(v).toFixed(0)}${unit}`;
+                    telemetryChart.options.scales.yMetric.suggestedMin = -20;
+                    telemetryChart.options.scales.yMetric.suggestedMax = 20;
                 } else {
                     telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${v}${unit}`;
                     delete telemetryChart.options.scales.yMetric.suggestedMin;
@@ -4780,6 +4887,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
                     else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
+                    else if (activeMetric === 'temp') val = (s.temp !== undefined) ? s.temp : 0;
+                    else if (activeMetric === 'headwind') val = (s.headwind !== undefined) ? s.headwind : 0;
                     return { x: s.d_km, y: val };
                 });
 
@@ -4795,6 +4904,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
                     else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
+                    else if (activeMetric === 'temp') val = (s.temp !== undefined) ? s.temp : 0;
+                    else if (activeMetric === 'headwind') val = (s.headwind !== undefined) ? s.headwind : 0;
                     pointDs.data = [{ x: s.d_km, y: val }];
                 }
             });
@@ -4849,6 +4960,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
                     else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
+                    else if (activeMetric === 'temp') val = (s.temp !== undefined) ? s.temp : 0;
+                    else if (activeMetric === 'headwind') val = (s.headwind !== undefined) ? s.headwind : 0;
                     telemetryChart.data.datasets[1 + numCiclistas + idx].data = [{ x: s.d_km, y: val }];
                 }
             });
@@ -6128,6 +6241,32 @@ def generar_html_dashboard_interactivo(
     logo_watermark_html = f'<div class="watermark-logo-badge"><img src="{logo_base64}" alt="Burgos BH Logo" class="watermark-img" /></div>' if logo_base64 else ''
     header_logo_html = f'<div class="logo-badge-header"><img src="{logo_base64}" alt="Burgos BH Logo" /></div>' if logo_base64 else ''
 
+    # Generar insignia meteorológica si hay datos climáticos disponibles
+    clima = etapa_info.get('clima')
+    if clima:
+        weather_badge_html = (
+            f'<div class="badge" style="background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.35); color: #f59e0b; display: inline-flex; align-items: center; gap: 6px;" '
+            f'title="Condiciones meteorológicas y viento Open-Meteo durante la etapa">'
+            f'<i data-lucide="sun"></i> '
+            f'<span>{clima.get("temp_media_c", "--")}°C</span> • '
+            f'<span>💧 {clima.get("humedad_media_pct", "--")}%</span> • '
+            f'<span>💨 {clima.get("viento_media_kmh", "--")} km/h ({clima.get("viento_cardinal", "--")})</span>'
+            f'{" • <span>(Ráfagas " + str(clima.get("viento_rafagas_max_kmh")) + " km/h)</span>" if clima.get("viento_rafagas_max_kmh") else ""}'
+            f'</div>'
+        )
+    else:
+        temps_fit = [c['stats']['temp_media_c'] for c in ciclistas_proc if c.get('stats', {}).get('temp_media_c') is not None]
+        if temps_fit:
+            temp_avg = round(float(np.mean(temps_fit)), 1)
+            weather_badge_html = (
+                f'<div class="badge" style="background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.35); color: #f59e0b; display: inline-flex; align-items: center; gap: 6px;" '
+                f'title="Temperatura media registrada por sensores FIT del equipo">'
+                f'<i data-lucide="thermometer"></i> <span>{temp_avg}°C (Sensor FIT)</span>'
+                f'</div>'
+            )
+        else:
+            weather_badge_html = ''
+
     html = HTML_TEMPLATE
     html = html.replace('__TITULO_ETAPA__', str(titulo_etapa))
     html = html.replace('__SUBTITULO_ETAPA__', str(subtitulo_etapa))
@@ -6135,6 +6274,7 @@ def generar_html_dashboard_interactivo(
     html = html.replace('__DESNIVEL_POS_M__', str(etapa_info.get('desnivel_pos_m', 0)))
     html = html.replace('__ALTITUD_MAX__', str(etapa_info.get('altitud_max', 0)))
     html = html.replace('__NUM_CICLISTAS__', str(len(ciclistas_proc)))
+    html = html.replace('__WEATHER_BADGE_HTML__', weather_badge_html)
     html = html.replace('__NP_MEDIA_EQUIPO__', str(np_media_equipo))
     html = html.replace('__IF_MEDIO_EQUIPO__', str(if_medio_equipo))
     html = html.replace('__TSS_MEDIO_EQUIPO__', str(tss_medio_equipo))
@@ -6785,6 +6925,30 @@ def generar_dashboard_perfil_interactivo(
         if _filtrados_norm:
             ciclistas_para_procesar = _filtrados_norm
 
+    # Obtener meteorología y condiciones de viento de la etapa vía Open-Meteo
+    clima_etapa = None
+    lat_ref = None
+    lon_ref = None
+    fecha_ref_clima = None
+    for r in ciclistas_para_procesar:
+        df_tmp = r['df'].dropna(subset=['lat', 'lon'])
+        if not df_tmp.empty:
+            lat_ref = float(df_tmp['lat'].mean())
+            lon_ref = float(df_tmp['lon'].mean())
+            if 'timestamp' in df_tmp.columns and pd.notna(df_tmp['timestamp'].iloc[0]):
+                fecha_ref_clima = df_tmp['timestamp'].iloc[0].strftime('%Y-%m-%d')
+            break
+
+    if lat_ref is not None and lon_ref is not None:
+        try:
+            print(f"🌤️ Consultando meteorología y viento de la etapa ({lat_ref:.2f}, {lon_ref:.2f}) el {fecha_ref_clima or 'hoy'}...")
+            clima_etapa = obtener_clima_open_meteo(lat_ref, lon_ref, fecha_ref_clima or datetime.now().date())
+            if clima_etapa:
+                print(f"   • {clima_etapa['temp_media_c']}°C | Humedad: {clima_etapa['humedad_media_pct']}% | "
+                      f"Viento: {clima_etapa['viento_media_kmh']} km/h ({clima_etapa['viento_cardinal']}) | Ráfagas: {clima_etapa['viento_rafagas_max_kmh']} km/h")
+        except Exception as e:
+            print(f"⚠️ No se pudo obtener el clima de la etapa: {e}")
+
     ciclistas_proc = []
     for idx, r in enumerate(ciclistas_para_procesar):
         color_cfg = COLORES_CICLISTAS[idx % len(COLORES_CICLISTAS)]
@@ -6796,7 +6960,8 @@ def generar_dashboard_perfil_interactivo(
                 color_cfg=color_cfg,
                 atleta_id=r['atleta_id'],
                 ftp=r.get('ftp', 380.0),
-                dist_referencia_km=dist_ref_etapa
+                dist_referencia_km=dist_ref_etapa,
+                clima_info=clima_etapa
             )
             ciclistas_proc.append(proc)
         except Exception as e:
@@ -6824,6 +6989,7 @@ def generar_dashboard_perfil_interactivo(
 
     # Construir perfil de referencia de la etapa
     etapa_info = construir_perfil_etapa_referencia(ciclistas_proc)
+    etapa_info['clima'] = clima_etapa
     if punto_comun:
         etapa_info['punto_sincronizado'] = [round(punto_comun[0], 5), round(punto_comun[1], 5)]
     if punto_comun_fin:

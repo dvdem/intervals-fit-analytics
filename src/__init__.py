@@ -14,6 +14,13 @@ from .pdf_reports import (
     generar_informe_wellness_hrv,
     generar_informe_etapa_pdf
 )
+from .weather_service import (
+    calcular_rho_preciso,
+    calcular_bearing_ciclista,
+    calcular_viento_efectivo,
+    obtener_clima_open_meteo,
+    deg_to_cardinal
+)
 from .interactive_profile import (
     generar_dashboard_perfil_interactivo,
     procesar_telemetria_ciclista,
@@ -42,4 +49,9 @@ __all__ = [
     "procesar_telemetria_ciclista",
     "buscar_fit_local_ciclista",
     "descargar_o_recopilar_fits_etapa",
+    "calcular_rho_preciso",
+    "calcular_bearing_ciclista",
+    "calcular_viento_efectivo",
+    "obtener_clima_open_meteo",
+    "deg_to_cardinal",
 ]
