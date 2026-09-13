@@ -737,7 +737,7 @@ def generar_informe_etapa_pdf(
         else:
             ax_tbl2.text(0.5, 0.5, "Información horaria no disponible para esta actividad.", transform=ax_tbl2.transAxes, ha='center', va='center', color='#94a3b8')
 
-        _add_footer(fig, watermark_img=watermark_img, pagina_num=1, total_paginas=5)
+        _add_footer(fig, watermark_img=watermark_img, pagina_num=1, total_paginas=6)
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
@@ -831,7 +831,7 @@ def generar_informe_etapa_pdf(
         _configurar_ejes_comparativa(ax_wkg, "2. Comparativa de Potencia Relativa al Peso (W / kg)", "W / kg")
         ax_wkg.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', frameon=True, facecolor='#ffffff', edgecolor='#cbd5e1', fontsize=8.5, ncol=2)
 
-        _add_footer(fig, watermark_img=watermark_img, pagina_num=2, total_paginas=5)
+        _add_footer(fig, watermark_img=watermark_img, pagina_num=2, total_paginas=6)
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
@@ -881,7 +881,7 @@ def generar_informe_etapa_pdf(
         _configurar_ejes_comparativa(ax_kj, "4. Comparativa de Trabajo Mecánico Acumulado (Kilojulios Totales & kJ/kg)", "Trabajo Acumulado (kJ)")
         ax_kj.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', frameon=True, facecolor='#ffffff', edgecolor='#cbd5e1', fontsize=8.5, ncol=2)
 
-        _add_footer(fig, watermark_img=watermark_img, pagina_num=3, total_paginas=5)
+        _add_footer(fig, watermark_img=watermark_img, pagina_num=3, total_paginas=6)
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
@@ -934,7 +934,135 @@ def generar_informe_etapa_pdf(
         _configurar_ejes_comparativa(ax_tss, "6. Comparativa de Carga y Estrés de Carrera Acumulado (TSS)", "TSS Acumulado")
         ax_tss.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', frameon=True, facecolor='#ffffff', edgecolor='#cbd5e1', fontsize=8.5, ncol=2)
 
-        _add_footer(fig, watermark_img=watermark_img, pagina_num=4, total_paginas=5)
+        _add_footer(fig, watermark_img=watermark_img, pagina_num=4, total_paginas=6)
+        pdf.savefig(fig, bbox_inches='tight')
+        plt.close(fig)
+
+    # =========================================================================
+    # PÁGINA 5: ANÁLISIS BIOMECÁNICO Y CUADRANTES DE TORQUE
+    # =========================================================================
+    def _crear_pagina_biomecanica_torque(pdf):
+        """Página 5: Análisis Biomecánico de Pedaleo, Cuadrantes de Torque y Picos MMT"""
+        fig = plt.figure(figsize=(16.5, 11.7))
+        fig.set_layout_engine('constrained', rect=[0, 0.045, 1, 1])
+        fig.patch.set_facecolor('#f8fafc')
+        gs = fig.add_gridspec(3, 2, height_ratios=[0.7, 3.8, 2.5], width_ratios=[1.1, 1.0])
+
+        ax_hdr = fig.add_subplot(gs[0, :])
+        _add_header(ax_hdr, logo_img, "ANÁLISIS BIOMECÁNICO Y DINÁMICA DE PEDALEO", f"{titulo_doc} | Análisis de Cuadrantes (Torque vs Cadencia), Fuerza Efectiva (AEPF) y Picos MMT")
+
+        # 1. Scatter Plot de Cuadrantes (Quadrant Analysis)
+        ax_quad = fig.add_subplot(gs[1, 0])
+        ax_quad.set_facecolor('#ffffff')
+
+        cad_th = 85.0
+        trq_th_vals = [c['stats'].get('cuadrantes', {}).get('trq_thresh', 42.0) for c in ciclistas_proc if 'cuadrantes' in c['stats']]
+        trq_th = float(np.mean(trq_th_vals)) if trq_th_vals else 42.0
+
+        # Sombreados para los 4 cuadrantes
+        ax_quad.axvspan(cad_th, 130, ymin=trq_th/85, ymax=1.0, color='#f59e0b', alpha=0.06, label='QI: Sprint/Ataque (Alta Cad, Alto Par)')
+        ax_quad.axvspan(30, cad_th, ymin=trq_th/85, ymax=1.0, color='#ec4899', alpha=0.06, label='QII: Escalada Dura (Baja Cad, Alto Par)')
+        ax_quad.axvspan(30, cad_th, ymin=0, ymax=trq_th/85, color='#94a3b8', alpha=0.06, label='QIII: Recuperación (Baja Cad, Bajo Par)')
+        ax_quad.axvspan(cad_th, 130, ymin=0, ymax=trq_th/85, color='#38bdf8', alpha=0.06, label='QIV: Pelotón Ágil (Alta Cad, Bajo Par)')
+
+        # Líneas de división de umbral
+        ax_quad.axvline(cad_th, color='#cbd5e1', linestyle='--', linewidth=1.2)
+        ax_quad.axhline(trq_th, color='#cbd5e1', linestyle='--', linewidth=1.2)
+
+        # Isolíneas de potencia (200W, 300W, 400W)
+        cad_seq = np.linspace(35, 125, 50)
+        for pot_ref, col_iso in [(200, '#94a3b8'), (300, '#0284c7'), (400, '#d97706')]:
+            trq_iso = pot_ref / (cad_seq * 2 * np.pi / 60.0)
+            ax_quad.plot(cad_seq, trq_iso, color=col_iso, linestyle=':', linewidth=1.0, alpha=0.6, label=f'Iso-P {pot_ref}W')
+
+        for c in ciclistas_proc:
+            pts = c['stats'].get('cuadrantes', {}).get('puntos', [])
+            if pts:
+                sub_pts = pts[::max(1, len(pts) // 250)]
+                xs = [p['cad'] for p in sub_pts]
+                ys = [p['trq'] for p in sub_pts]
+                col = c['stats']['color']
+                nom = c['stats']['nombre']
+                ax_quad.scatter(xs, ys, color=col, alpha=0.65, s=14, edgecolors='none', label=nom)
+
+        ax_quad.set_title("Diagrama de Cuadrantes (Coggan Quadrant Analysis)", fontsize=11, fontweight='bold', pad=8, color='#0f172a')
+        ax_quad.set_xlabel("Cadencia de Pedaleo (rpm)", fontsize=9, fontweight='600', color='#475569')
+        ax_quad.set_ylabel("Torque en Bielas (N·m)", fontsize=9, fontweight='600', color='#475569')
+        ax_quad.set_xlim(30, 130)
+        ax_quad.set_ylim(0, 85)
+        ax_quad.grid(True, linestyle='--', alpha=0.3, color='#94a3b8')
+        ax_quad.legend(loc='upper right', frameon=True, facecolor='#ffffff', edgecolor='#cbd5e1', fontsize=7.0, ncol=2)
+
+        # 2. Serie Temporal de Torque y AEPF a lo largo de la etapa
+        ax_trq = fig.add_subplot(gs[1, 1])
+        _dibujar_perfil_fondo(ax_trq)
+        for c in ciclistas_proc:
+            samples = c.get('samples_by_dist', [])
+            if not samples:
+                continue
+            xs = [s['d_km'] for s in samples]
+            ys = [s.get('trq', 0.0) for s in samples]
+            nom = c['stats']['nombre']
+            col = c['stats']['color']
+            trq_med = c['stats'].get('torque_media_nm', 0.0)
+            trq_max = c['stats'].get('torque_max_nm', 0.0)
+            ax_trq.plot(xs, ys, color=col, linewidth=1.8, zorder=4, label=f"{nom} (Med: {trq_med} N·m | Máx: {trq_max} N·m)")
+
+        _configurar_ejes_comparativa(ax_trq, "Evolución de Torque en Bielas (N·m) a lo largo de la Etapa", "Torque (N·m)")
+        ax_trq.legend(bbox_to_anchor=(0.5, -0.15), loc='upper center', frameon=True, facecolor='#ffffff', edgecolor='#cbd5e1', fontsize=8.0, ncol=2)
+
+        # 3. Tabla Comparativa de Picos MMT y Cuadrantes
+        ax_tbl = fig.add_subplot(gs[2, :])
+        ax_tbl.axis('off')
+
+        cols = [
+            "Ciclista", "Torque Med.", "Torque Máx.", "Fuerza Pedal (AEPF)",
+            "MMT 1s (Arrancada)", "MMT 5s", "MMT 30s", "QI (Sprint)", "QII (Escalada)", "QIV (Pelotón)"
+        ]
+        tabla_datos = []
+        for c in ciclistas_proc:
+            s = c['stats']
+            mmt = s.get('torque_mmt', {})
+            q = s.get('cuadrantes', {}).get('cuadrantes', {})
+            m1 = f"{mmt.get(1, '--')} N·m" if 1 in mmt else "--"
+            m5 = f"{mmt.get(5, '--')} N·m" if 5 in mmt else "--"
+            m30 = f"{mmt.get(30, '--')} N·m" if 30 in mmt else "--"
+            q1 = f"{q.get('q1_pct', 0)}%"
+            q2 = f"{q.get('q2_pct', 0)}%"
+            q4 = f"{q.get('q4_pct', 0)}%"
+
+            tabla_datos.append([
+                s['nombre'],
+                f"{s.get('torque_media_nm', '--')} N·m",
+                f"{s.get('torque_max_nm', '--')} N·m",
+                f"{s.get('aepf_media_n', '--')} N ({s.get('kgf_media', '--')} kgf)",
+                m1, m5, m30, q1, q2, q4
+            ])
+
+        table = ax_tbl.table(
+            cellText=tabla_datos,
+            colLabels=cols,
+            cellLoc='center',
+            loc='center',
+            bbox=[0.0, 0.05, 1.0, 0.9]
+        )
+        table.auto_set_font_size(False)
+        table.set_fontsize(8.5)
+        for (r_idx, c_idx), cell in table.get_celld().items():
+            cell.set_edgecolor('#e2e8f0')
+            if r_idx == 0:
+                cell.set_facecolor('#0f172a')
+                cell.set_text_props(color='#f8fafc', weight='bold')
+                cell.set_height(0.18)
+            else:
+                row_bg = '#ffffff' if r_idx % 2 != 0 else '#f8fafc'
+                cell.set_facecolor(row_bg)
+                cell.set_text_props(color='#1e293b')
+                cell.set_height(0.14)
+                if c_idx == 0:
+                    cell.set_text_props(ha='left', weight='bold')
+
+        _add_footer(fig, watermark_img=watermark_img, pagina_num=5, total_paginas=6)
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
@@ -1074,7 +1202,7 @@ def generar_informe_etapa_pdf(
             ax_hrv.text(0.5, 0.5, "Sin registros de HRV en el histórico de la API para los atletas seleccionados.", transform=ax_hrv.transAxes, ha='center', va='center', color='#94a3b8')
             ax_hrv.axis('off')
 
-        _add_footer(fig, watermark_img=watermark_img, pagina_num=5, total_paginas=5)
+        _add_footer(fig, watermark_img=watermark_img, pagina_num=6, total_paginas=6)
         pdf.savefig(fig, bbox_inches='tight')
         plt.close(fig)
 
@@ -1088,6 +1216,7 @@ def generar_informe_etapa_pdf(
             _crear_pagina_graficos_1(pdf)
             _crear_pagina_graficos_2(pdf)
             _crear_pagina_graficos_3(pdf)
+            _crear_pagina_biomecanica_torque(pdf)
             _crear_pagina_fisiologia(pdf)
     except PermissionError:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1097,6 +1226,7 @@ def generar_informe_etapa_pdf(
             _crear_pagina_graficos_1(pdf)
             _crear_pagina_graficos_2(pdf)
             _crear_pagina_graficos_3(pdf)
+            _crear_pagina_biomecanica_torque(pdf)
             _crear_pagina_fisiologia(pdf)
 
     return output_pdf

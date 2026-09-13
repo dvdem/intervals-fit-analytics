@@ -28,11 +28,13 @@ from config import (
     DEFAULT_ROSTER_PATH,
     OUTPUT_DIR,
     DEFAULT_BIKE_WEIGHT,
-    DEFAULT_RIDER_WEIGHT
+    DEFAULT_RIDER_WEIGHT,
+    DEFAULT_CRANK_LENGTH
 )
 from src import (
     IntervalsClient,
     cargar_fit,
+    cargar_fit_con_tiempo_movimiento,
     preprocesar_datos,
     estimar_cda,
     calcular_picos_potencia,
@@ -46,6 +48,7 @@ from src import (
     generar_informe_etapa_pdf,
     generar_dashboard_perfil_interactivo,
     descargar_o_recopilar_fits_etapa,
+    calcular_metricas_torque_completas,
 )
 from src.fit_analyzer import graficar_analisis_fit
 
@@ -226,6 +229,55 @@ def cmd_fit_cda(args):
         save_path = args.save_plot or (OUTPUT_DIR / f"cda_{ruta_fit.stem}.png")
         print(f"🎨 Guardando gráfico de validación en: {save_path}...")
         graficar_analisis_fit(df_proc, res, guardar_ruta=save_path, mostrar=args.plot)
+
+
+def cmd_fit_torque(args):
+    """Analiza la biomecánica de pedaleo, torque, fuerza (AEPF) y cuadrantes de un archivo FIT."""
+    ruta_fit = Path(args.fit_file)
+    if not ruta_fit.exists():
+        print(f"❌ Error: El archivo {ruta_fit} no existe.")
+        sys.exit(1)
+
+    print(f"\n⚙️ Analizando biomecánica de torque y pedaleo: {ruta_fit.name}...")
+    df_clean = cargar_fit_con_tiempo_movimiento(ruta_fit, solo_movimiento=True)
+    if df_clean.empty:
+        print("❌ Error: No se encontraron registros de movimiento válidos en el archivo FIT.")
+        sys.exit(1)
+
+    stats = calcular_metricas_torque_completas(df_clean, ftp=args.ftp, crank_length_m=args.crank_length)
+
+    print("\n" + "=" * 55)
+    print("🚴 RESULTADOS DE ANÁLISIS DE TORQUE Y BIOMECÁNICA")
+    print("=" * 55)
+    print(f"   • Torque Medio Pedaleando:   {stats['trq_media_nm']} N·m")
+    print(f"   • Torque Mediana:            {stats['trq_mediana_nm']} N·m")
+    print(f"   • Torque P95:                {stats['trq_p95_nm']} N·m")
+    print(f"   • Torque Máximo Pico:        {stats['trq_max_nm']} N·m")
+    print(f"   • Fuerza Efectiva Pedal Med: {stats['aepf_media_n']} N ({stats['kgf_media']} kgf)")
+    print(f"   • Fuerza Efectiva Pedal Máx: {stats['aepf_max_n']} N ({stats['kgf_max']} kgf)")
+    print(f"   • Longitud de Biela:         {stats['crank_length_mm']} mm")
+    print("-" * 55)
+    print("⚡ PICOS DE MEAN MAXIMAL TORQUE (MMT):")
+    for sec, val in stats['mmt'].items():
+        dur_str = f"{sec}s" if sec < 60 else f"{sec//60}m"
+        print(f"   • Pico {dur_str:4s}:                 {val:5.1f} N·m")
+    print("-" * 55)
+    q = stats['cuadrantes']['cuadrantes']
+    print("🎯 DISTRIBUCIÓN DE ANÁLISIS DE CUADRANTES (COGGAN):")
+    print(f"   • QI  (Alta Cad, Alto Par - Sprint/Ataque): {q['q1_pct']:4.1f}% ({q['q1_sec']}s)")
+    print(f"   • QII (Baja Cad, Alto Par - Escalada Dura): {q['q2_pct']:4.1f}% ({q['q2_sec']}s)")
+    print(f"   • QIII(Baja Cad, Bajo Par - Recuperación):  {q['q3_pct']:4.1f}% ({q['q3_sec']}s)")
+    print(f"   • QIV (Alta Cad, Bajo Par - Pelotón Ágil):  {q['q4_pct']:4.1f}% ({q['q4_sec']}s)")
+    if stats.get('perfil_fv', {}).get('disponible'):
+        fv = stats['perfil_fv']
+        print("-" * 55)
+        print("📐 PERFIL FUERZA - VELOCIDAD (F-v):")
+        print(f"   • Torque Isométrico Teórico (T0): {fv['t0_nm']} N·m")
+        print(f"   • Cadencia Máx Teórica (cad0):    {fv['cad0_rpm']} rpm")
+        print(f"   • Cadencia Óptima Sprint:         {fv['cad_opt_rpm']} rpm")
+        print(f"   • Potencia Máx Teórica (Pmax):    {fv['pmax_teorico_w']} W")
+        print(f"   • Ajuste R²:                      {fv['r2']}")
+    print("=" * 55 + "\n")
 
 
 def cmd_download_fit(args):
@@ -445,6 +497,13 @@ def main():
     p_fit.add_argument("--plot", action="store_true", help="Mostrar gráficos interactivos")
     p_fit.add_argument("--save-plot", help="Guardar gráfico PNG en la ruta indicada")
     p_fit.set_defaults(func=cmd_fit_cda)
+
+    # Comando: fit-torque
+    p_torque = subparsers.add_parser("fit-torque", help="Analiza la biomecánica de torque, fuerza en pedales y cuadrantes de un archivo FIT")
+    p_torque.add_argument("fit_file", help="Ruta al archivo .fit a analizar")
+    p_torque.add_argument("--ftp", type=float, default=380.0, help="FTP de referencia del ciclista en vatios (default: 380)")
+    p_torque.add_argument("--crank-length", type=float, default=DEFAULT_CRANK_LENGTH, help=f"Longitud de biela en metros (default: {DEFAULT_CRANK_LENGTH})")
+    p_torque.set_defaults(func=cmd_fit_torque)
 
     # Comando: download-fit
     p_down = subparsers.add_parser("download-fit", help="Descarga el archivo FIT de una actividad")

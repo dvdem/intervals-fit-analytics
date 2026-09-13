@@ -25,7 +25,8 @@ try:
         DEFAULT_GRAVITY,
         DEFAULT_DRIVETRAIN_EFF,
         DEFAULT_BIKE_WEIGHT,
-        DEFAULT_RIDER_WEIGHT
+        DEFAULT_RIDER_WEIGHT,
+        DEFAULT_CRANK_LENGTH
     )
 except (ImportError, ValueError):
     from ..config import (
@@ -33,7 +34,8 @@ except (ImportError, ValueError):
         DEFAULT_GRAVITY,
         DEFAULT_DRIVETRAIN_EFF,
         DEFAULT_BIKE_WEIGHT,
-        DEFAULT_RIDER_WEIGHT
+        DEFAULT_RIDER_WEIGHT,
+        DEFAULT_CRANK_LENGTH
     )
 
 
@@ -44,7 +46,7 @@ def cargar_fit(ruta_archivo: Union[str, Path], permitir_vacio: bool = False) -> 
     Si permitir_vacio=True y el archivo no contiene registros válidos, devuelve un DataFrame vacío.
     """
     ruta = Path(ruta_archivo)
-    columnas_estandar = ['timestamp', 'potencia', 'velocidad', 'altitud', 'cadencia', 'fc', 'distancia', 'lat', 'lon', 'temperatura']
+    columnas_estandar = ['timestamp', 'potencia', 'velocidad', 'altitud', 'cadencia', 'fc', 'distancia', 'lat', 'lon', 'temperatura', 'torque', 'aepf']
 
     if not ruta.exists():
         if permitir_vacio:
@@ -71,6 +73,11 @@ def cargar_fit(ruta_archivo: Union[str, Path], permitir_vacio: bool = False) -> 
                     hr = campos.get('heart_rate')
                     dist = campos.get('distance')
                     temp = campos.get('temperature')
+                    trq_raw = campos.get('torque', campos.get('crank_torque'))
+                    te_l = campos.get('left_torque_effectiveness')
+                    te_r = campos.get('right_torque_effectiveness')
+                    ps_l = campos.get('left_pedal_smoothness')
+                    ps_r = campos.get('right_pedal_smoothness')
 
                     lat_raw = campos.get('position_lat')
                     lon_raw = campos.get('position_long')
@@ -80,7 +87,7 @@ def cargar_fit(ruta_archivo: Union[str, Path], permitir_vacio: bool = False) -> 
 
                     # Guardamos los registros que cuenten al menos con timestamp
                     if t is not None:
-                        registros.append({
+                        reg = {
                             'timestamp': pd.to_datetime(t),
                             'potencia': float(p) if p is not None else np.nan,
                             'velocidad': float(v) if v is not None else np.nan,
@@ -91,7 +98,18 @@ def cargar_fit(ruta_archivo: Union[str, Path], permitir_vacio: bool = False) -> 
                             'lat': lat,
                             'lon': lon,
                             'temperatura': float(temp) if temp is not None else np.nan,
-                        })
+                        }
+                        if trq_raw is not None:
+                            reg['torque'] = float(trq_raw)
+                        if te_l is not None:
+                            reg['left_torque_effectiveness'] = float(te_l)
+                        if te_r is not None:
+                            reg['right_torque_effectiveness'] = float(te_r)
+                        if ps_l is not None:
+                            reg['left_pedal_smoothness'] = float(ps_l)
+                        if ps_r is not None:
+                            reg['right_pedal_smoothness'] = float(ps_r)
+                        registros.append(reg)
     except Exception as e:
         if permitir_vacio:
             return pd.DataFrame(columns=columnas_estandar)
@@ -107,6 +125,24 @@ def cargar_fit(ruta_archivo: Union[str, Path], permitir_vacio: bool = False) -> 
     if ts_series.dt.tz is not None:
         ts_series = ts_series.dt.tz_convert('UTC').dt.tz_localize(None)
     df['timestamp'] = ts_series
+
+    # Derivación matemática segura de Torque (N*m) y Fuerza Efectiva (AEPF, N)
+    p_vals = df['potencia'].fillna(0.0).values
+    c_vals = df['cadencia'].fillna(0.0).values
+    omega = c_vals * (2.0 * np.pi / 60.0)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        trq_calc = np.where(c_vals >= 15.0, p_vals / omega, 0.0)
+        trq_calc = np.nan_to_num(trq_calc, nan=0.0, posinf=0.0, neginf=0.0)
+        trq_calc = np.clip(trq_calc, 0.0, 250.0)
+
+    if 'torque' not in df.columns:
+        df['torque'] = trq_calc
+    else:
+        df['torque'] = df['torque'].fillna(pd.Series(trq_calc, index=df.index))
+
+    df['aepf'] = df['torque'] / DEFAULT_CRANK_LENGTH
+
     return df.sort_values('timestamp').reset_index(drop=True)
 
 
@@ -146,6 +182,11 @@ def cargar_fit_con_tiempo_movimiento(
         if df.empty:
             return pd.DataFrame()
         df['delta_t'] = df['timestamp'].diff().dt.total_seconds().fillna(1.0).clip(lower=0.0)
+
+    if 'torque' in df.columns:
+        df['torque'] = df['torque'].fillna(0.0).astype(float)
+    if 'aepf' in df.columns:
+        df['aepf'] = df['aepf'].fillna(0.0).astype(float)
 
     df['moving_time'] = range(1, len(df) + 1)
     return df

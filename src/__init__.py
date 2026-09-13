@@ -27,6 +27,15 @@ from .interactive_profile import (
     buscar_fit_local_ciclista,
     descargar_o_recopilar_fits_etapa
 )
+from .torque_analytics import (
+    calcular_torque_seguro,
+    calcular_picos_torque,
+    calcular_analisis_cuadrantes,
+    calcular_zonas_torque,
+    calcular_perfil_fuerza_velocidad,
+    calcular_degradacion_fatiga_torque,
+    calcular_metricas_torque_completas
+)
 
 __all__ = [
     "IntervalsClient",
@@ -54,4 +63,11 @@ __all__ = [
     "calcular_viento_efectivo",
     "obtener_clima_open_meteo",
     "deg_to_cardinal",
+    "calcular_torque_seguro",
+    "calcular_picos_torque",
+    "calcular_analisis_cuadrantes",
+    "calcular_zonas_torque",
+    "calcular_perfil_fuerza_velocidad",
+    "calcular_degradacion_fatiga_torque",
+    "calcular_metricas_torque_completas",
 ]

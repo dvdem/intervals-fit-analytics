@@ -28,6 +28,7 @@ from config import (
     OUTPUT_DIR,
     DEFAULT_RIDER_WEIGHT,
     DEFAULT_BIKE_WEIGHT,
+    DEFAULT_CRANK_LENGTH,
 )
 from src.intervals_api import IntervalsClient
 from src.fit_analyzer import cargar_fit, cargar_fit_con_tiempo_movimiento
@@ -38,6 +39,10 @@ from src.weather_service import (
     calcular_viento_efectivo,
     obtener_clima_open_meteo,
     deg_to_cardinal,
+)
+from src.torque_analytics import (
+    calcular_torque_seguro,
+    calcular_metricas_torque_completas,
 )
 
 # Paleta de colores distintiva para ciclistas (estilo Pro Cycling)
@@ -134,6 +139,22 @@ def procesar_telemetria_ciclista(
     df_gps['altitud'] = df_gps['altitud'].ffill().fillna(0).astype(float)
     df_gps['fc'] = df_gps['fc'].fillna(0).astype(int)
     df_gps['cadencia'] = df_gps['cadencia'].fillna(0).astype(int)
+
+    # Torque (N*m) y Fuerza Efectiva (AEPF, N)
+    if 'torque' not in df_gps.columns or df_gps['torque'].isna().all():
+        trq_gps, aepf_gps = calcular_torque_seguro(
+            df_gps['potencia'].values,
+            df_gps['cadencia'].values,
+            crank_length_m=DEFAULT_CRANK_LENGTH
+        )
+        df_gps['torque'] = trq_gps
+        df_gps['aepf'] = aepf_gps
+    else:
+        df_gps['torque'] = df_gps['torque'].fillna(0.0).astype(float)
+        if 'aepf' not in df_gps.columns or df_gps['aepf'].isna().all():
+            df_gps['aepf'] = (df_gps['torque'] / DEFAULT_CRANK_LENGTH).astype(float)
+        else:
+            df_gps['aepf'] = df_gps['aepf'].fillna(0.0).astype(float)
 
     # Distancia acumulada (recalculada en movimiento para evitar derivas GPS estáticas)
     if 'distancia' not in df_gps.columns or df_gps['distancia'].isna().all() or df_gps['distancia'].max() == 0:
@@ -252,6 +273,26 @@ def procesar_telemetria_ciclista(
         'temp_max_c': round(float(df_gps['temperatura'].max()), 1) if 'temperatura' in df_gps.columns and df_gps['temperatura'].notna().any() else None,
     }
 
+    # Métricas avanzadas de Torque, Cuadrantes y Dinámica de Pedaleo
+    torque_stats = calcular_metricas_torque_completas(
+        df_gps,
+        ftp=ftp_val,
+        crank_length_m=DEFAULT_CRANK_LENGTH
+    )
+    stats['torque_media_nm'] = torque_stats.get('trq_media_nm', 0.0)
+    stats['torque_max_nm'] = torque_stats.get('trq_max_nm', 0.0)
+    stats['torque_p95_nm'] = torque_stats.get('trq_p95_nm', 0.0)
+    stats['aepf_media_n'] = torque_stats.get('aepf_media_n', 0.0)
+    stats['aepf_max_n'] = torque_stats.get('aepf_max_n', 0.0)
+    stats['kgf_media'] = torque_stats.get('kgf_media', 0.0)
+    stats['kgf_max'] = torque_stats.get('kgf_max', 0.0)
+    stats['torque_mmt'] = torque_stats.get('mmt', {})
+    stats['cuadrantes'] = torque_stats.get('cuadrantes', {})
+    stats['zonas_torque'] = torque_stats.get('zonas', {})
+    stats['perfil_fv'] = torque_stats.get('perfil_fv', {})
+    stats['fatiga_torque'] = torque_stats.get('fatiga', {})
+    stats['dinamicas_nativas'] = torque_stats.get('dinamicas_nativas', {})
+
     # Desglose horario de gasto energético y ritmo sobre tiempo en movimiento (Hourly Energy Breakdown)
     desglose_horas = []
     duracion_horas_total = max(1, math.ceil(tiempo_mov_seg / 3600.0))
@@ -313,6 +354,8 @@ def procesar_telemetria_ciclista(
     df_gps['potencia_smooth_60s'] = df_gps['potencia'].rolling(window=60, min_periods=1, center=True).mean()
     df_gps['fc_smooth_60s'] = df_gps['fc'].astype(float).rolling(window=60, min_periods=1, center=True).mean()
     df_gps['velocidad_smooth_60s'] = df_gps['velocidad_kmh'].astype(float).rolling(window=60, min_periods=1, center=True).mean()
+    df_gps['torque_smooth_60s'] = df_gps['torque'].rolling(window=60, min_periods=1, center=True).mean()
+    df_gps['aepf_smooth_60s'] = df_gps['aepf'].rolling(window=60, min_periods=1, center=True).mean()
 
     # --- Cálculo de CdA Virtual con densidad del aire dinámica y viento efectivo ---
     peso_total = max(30.0, peso) + 8.5  # Asumimos 8.5kg de bici por defecto
@@ -419,6 +462,8 @@ def procesar_telemetria_ciclista(
     headwind_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['v_headwind_kmh'].values)
     vair_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['v_air_ms'].values)
     yaw_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['yaw_deg'].values)
+    trq_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['torque_smooth_60s'].values)
+    aepf_by_dist = np.interp(grid_dist, dists_km_arr, df_gps['aepf_smooth_60s'].values)
     t_by_dist = np.interp(grid_dist, dists_km_arr, t_mov_sec_arr)
 
     samples_by_dist = []
@@ -441,6 +486,8 @@ def procesar_telemetria_ciclista(
             'spd': round(float(spd_by_dist[i]), 1),
             'hr': int(round(float(hr_by_dist[i]))),
             'cad': int(round(float(cad_by_dist[i]))),
+            'trq': round(float(trq_by_dist[i]), 1),
+            'aepf': int(round(float(aepf_by_dist[i]))),
             'grad': round(float(grad_by_dist[i]), 1),
             'cda': round(float(cda_by_dist[i]), 3),
             'temp': round(float(temp_by_dist[i]), 1),
@@ -468,6 +515,8 @@ def procesar_telemetria_ciclista(
     headwind_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['v_headwind_kmh'].values)
     vair_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['v_air_ms'].values)
     yaw_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['yaw_deg'].values)
+    trq_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['torque_smooth_60s'].values)
+    aepf_by_time = np.interp(grid_time_mov, t_mov_sec_arr, df_gps['aepf_smooth_60s'].values)
 
     samples_by_time = []
     for i in range(num_grid_points):
@@ -491,6 +540,8 @@ def procesar_telemetria_ciclista(
             'spd': round(float(spd_by_time[i]), 1),
             'hr': int(round(float(hr_by_time[i]))),
             'cad': int(round(float(cad_by_time[i]))),
+            'trq': round(float(trq_by_time[i]), 1),
+            'aepf': int(round(float(aepf_by_time[i]))),
             'grad': round(float(grad_by_time[i]), 1),
             'cda': round(float(cda_by_time[i]), 3),
             'temp': round(float(temp_by_time[i]), 1),
@@ -894,7 +945,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <script src="https://unpkg.com/lucide@latest"></script>
 
     <style>
-        :root {
+        :root, [data-theme="light"] {
             /* Paleta Burgos Burpellet BH — Light Theme (Default) */
             --bg-base: #f8f6fc;
             --bg-card: rgba(255, 255, 255, 0.96);
@@ -1687,6 +1738,99 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             gap: 6px;
             flex-wrap: wrap;
         }
+
+        /* Estilos de Sección de Análisis Biomecánico y Cuadrantes de Torque */
+        .torque-section {
+            background: var(--bg-card);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border-card);
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: var(--card-shadow);
+        }
+
+        .torque-kpis-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .torque-kpi-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-card);
+            border-radius: 14px;
+            padding: 14px 16px;
+            box-shadow: var(--card-shadow);
+            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .torque-kpi-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--border-glow);
+            box-shadow: var(--card-shadow-hover);
+        }
+
+        .torque-kpi-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 6px;
+        }
+
+        .torque-kpi-lbl {
+            font-size: 0.76rem;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            font-weight: 600;
+            letter-spacing: 0.03em;
+        }
+
+        .torque-kpi-val {
+            font-size: 1.5rem;
+            font-weight: 800;
+            font-family: var(--font-mono);
+            line-height: 1.1;
+        }
+
+        .torque-kpi-sub {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+
+        .torque-viz-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-card);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--card-shadow);
+        }
+
+        .quadrant-legend-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 10px;
+            margin-top: 14px;
+            padding: 12px 14px;
+            background: var(--bg-panel-solid);
+            border: 1px solid var(--border-subtle);
+            border-radius: 10px;
+            font-size: 0.76rem;
+        }
+
+        .quadrant-legend-item {
+            padding-left: 10px;
+            line-height: 1.45;
+        }
+        .quadrant-legend-item.qi { border-left: 3px solid #f59e0b; }
+        .quadrant-legend-item.qii { border-left: 3px solid #ec4899; }
+        .quadrant-legend-item.qiii { border-left: 3px solid #94a3b8; }
+        .quadrant-legend-item.qiv { border-left: 3px solid #0284c7; }
 
         /* Header con Logo Corporativo */
         .header-brand {
@@ -2612,6 +2756,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <button class="tab-btn" data-metric="kjkg_h">kJ / kg / h</button>
                     <button class="tab-btn" data-metric="hr">Pulso</button>
                     <button class="tab-btn" data-metric="cda">CdA (m²)</button>
+                    <button class="tab-btn" data-metric="trq">Torque (N·m)</button>
+                    <button class="tab-btn" data-metric="aepf">Fuerza Pedal (N)</button>
                     <!--button class="tab-btn" data-metric="temp">Temperatura (°C)</button>
                     <button class="tab-btn" data-metric="headwind">Viento Efectivo (km/h)</button-->
                 </div>
@@ -2827,6 +2973,89 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div id="hourlyBreakdownContainer"></div>
     </section>
 
+    <!-- Sección de Análisis Biomecánico y Cuadrantes de Pedaleo (Torque vs Cadencia) -->
+    <section class="summary-card torque-section" style="margin-bottom: 24px;" id="torqueQuadrantSection">
+        <div class="viz-header" style="margin-bottom: 16px;">
+            <div class="viz-title">
+                <i data-lucide="gauge" style="color: #d97706;"></i>
+                Análisis Biomecánico de Pedaleo y Cuadrantes (Torque vs Cadencia)
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); font-weight: 500;">
+                Demanda neuromuscular (Coggan Quadrant Analysis), fuerza efectiva en pedales (AEPF) y picos de torque MMT
+            </div>
+        </div>
+
+        <!-- Tarjetas Resumen KPIs de Torque del Equipo -->
+        <div class="torque-kpis-grid" id="torqueKpisContainer"></div>
+
+        <!-- Gráfico de Dispersión Cuadrantes (Quadrant Analysis) -->
+        <div class="viz-card torque-viz-card">
+            <div class="viz-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div class="viz-title" style="font-size: 0.95rem;">
+                    <i data-lucide="scatter-chart" style="color: #d97706;"></i>
+                    Diagrama de Cuadrantes: Par / Torque (N·m) vs Cadencia (rpm)
+                </div>
+                <div class="torque-chart-controls" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                    <div class="rider-selector-wrapper" style="display: inline-flex; align-items: center; gap: 6px;">
+                        <label for="torqueRiderSelect" style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">Ciclista:</label>
+                        <select id="torqueRiderSelect" class="custom-select">
+                            <option value="all">Todos los Ciclistas</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div class="chart-wrapper" style="min-height: 420px; position: relative;">
+                <canvas id="quadrantScatterChart"></canvas>
+            </div>
+            <!-- Leyenda explicativa de los 4 cuadrantes -->
+            <div class="quadrant-legend-grid">
+                <div class="quadrant-legend-item qi">
+                    <strong style="color: #d97706;">Cuadrante I: Alta Cad. / Alto Par</strong><br>
+                    <span style="color: var(--text-muted);">Sprints, ataques, aceleraciones y arrancadas (máxima demanda neuromuscular y glucolítica).</span>
+                </div>
+                <div class="quadrant-legend-item qii">
+                    <strong style="color: #db2777;">Cuadrante II: Baja Cad. / Alto Par</strong><br>
+                    <span style="color: var(--text-muted);">Subidas duras (>8%), repechos violentos y pedaleo atrancado (alta tensión muscular).</span>
+                </div>
+                <div class="quadrant-legend-item qiii">
+                    <strong style="color: var(--text-muted);">Cuadrante III: Baja Cad. / Bajo Par</strong><br>
+                    <span style="color: var(--text-muted);">Recuperación activa, transiciones y bajadas pedaleando con poca inercia.</span>
+                </div>
+                <div class="quadrant-legend-item qiv">
+                    <strong style="color: #0284c7;">Cuadrante IV: Alta Cad. / Bajo Par</strong><br>
+                    <span style="color: var(--text-muted);">Rodar a rueda protegido en pelotón llano a 50+ km/h (alta eficiencia aeróbica con bajo estrés periférico).</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabla Comparativa de Picos MMT y Cuadrantes -->
+        <div class="viz-title" style="font-size: 0.92rem; margin-bottom: 12px;">
+            <i data-lucide="table-2" style="color: #d97706;"></i>
+            Tabla Comparativa de Picos de Torque (MMT) y Distribución de Cuadrantes
+        </div>
+        <div style="overflow-x: auto;">
+            <table class="styled-table" id="torqueSummaryTable">
+                <thead>
+                    <tr>
+                        <th style="width: 45px; text-align: center;">#</th>
+                        <th>Ciclista</th>
+                        <th>Torque Med.</th>
+                        <th>Torque Máx.</th>
+                        <th>Fuerza Pedal (AEPF)</th>
+                        <th>Pico 1s (Arrancada)</th>
+                        <th>Pico 5s</th>
+                        <th>Pico 30s</th>
+                        <th>QI (Sprint/Ataque)</th>
+                        <th>QII (Escalada Dura)</th>
+                        <th>QIII (Recuperación)</th>
+                        <th>QIV (Pelotón Ágil)</th>
+                    </tr>
+                </thead>
+                <tbody id="torqueTableBody"></tbody>
+            </table>
+        </div>
+    </section>
+
     <!-- Sección de Salud, Fisiología y Carga de Entrenamiento -->
     <section class="health-load-section" id="healthLoadSection">
         <!--div class="health-header">
@@ -2930,40 +3159,135 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         
         // =========================================================
-        // Gestión de Tema Claro / Oscuro
+        // Gestión de Tema Claro / Oscuro Unificada
         // =========================================================
-        function initThemeToggle() {
-            const btn = document.getElementById('btnThemeToggle');
-            const icon = document.getElementById('themeIcon');
-            const txt = document.getElementById('themeText');
-            if (!btn) return;
-
-            const savedTheme = localStorage.getItem('profile_theme') || 'light';
-            if (savedTheme === 'dark') {
+        function applyTheme(theme) {
+            const isDark = theme === 'dark';
+            if (isDark) {
                 document.documentElement.setAttribute('data-theme', 'dark');
-                if (icon) icon.setAttribute('data-lucide', 'sun');
-                if (txt) txt.innerText = 'Claro';
             } else {
                 document.documentElement.removeAttribute('data-theme');
-                if (icon) icon.setAttribute('data-lucide', 'moon');
-                if (txt) txt.innerText = 'Oscuro';
+                document.documentElement.setAttribute('data-theme', 'light');
+            }
+            try {
+                localStorage.setItem('profile_theme', theme);
+                localStorage.setItem('theme', theme);
+            } catch (e) {}
+
+            const icon = document.getElementById('themeIcon');
+            const txt = document.getElementById('themeText');
+            if (icon) {
+                icon.setAttribute('data-lucide', isDark ? 'sun' : 'moon');
+            }
+            if (txt) {
+                txt.innerText = isDark ? 'Claro' : 'Oscuro';
+            }
+            if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons();
+
+            // Actualizar mosaico del mapa Leaflet si existe
+            if (window.map && window.mapLayers) {
+                window.mapLayers.clearLayers();
+                const tileUrl = isDark 
+                    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+                    : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
+                L.tileLayer(tileUrl, {
+                    attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+                    subdomains: 'abcd',
+                    maxZoom: 20
+                }).addTo(window.mapLayers);
             }
 
-            btn.addEventListener('click', () => {
-                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-                if (isDark) {
-                    document.documentElement.removeAttribute('data-theme');
-                    localStorage.setItem('profile_theme', 'light');
-                    if (icon) icon.setAttribute('data-lucide', 'moon');
-                    if (txt) txt.innerText = 'Oscuro';
-                } else {
-                    document.documentElement.setAttribute('data-theme', 'dark');
-                    localStorage.setItem('profile_theme', 'dark');
-                    if (icon) icon.setAttribute('data-lucide', 'sun');
-                    if (txt) txt.innerText = 'Claro';
+            // Actualizar paleta de Chart.js
+            const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(124, 58, 237, 0.08)';
+            const tickColor = isDark ? '#a89ec4' : '#645a78';
+            const titleColor = isDark ? '#f8fafc' : '#1e152d';
+
+            if (typeof Chart !== 'undefined') {
+                Chart.defaults.color = tickColor;
+                Chart.defaults.borderColor = gridColor;
+            }
+
+            // Telemetría
+            if (typeof telemetryChart !== 'undefined' && telemetryChart) {
+                if (telemetryChart.options.scales.x) {
+                    telemetryChart.options.scales.x.grid.color = gridColor;
+                    telemetryChart.options.scales.x.ticks.color = tickColor;
                 }
-                if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons();
-            });
+                if (telemetryChart.options.scales.yMetric) {
+                    telemetryChart.options.scales.yMetric.grid.color = gridColor;
+                }
+                if (telemetryChart.options.plugins && telemetryChart.options.plugins.legend) {
+                    telemetryChart.options.plugins.legend.labels.color = tickColor;
+                }
+                telemetryChart.update();
+            }
+
+            // Elevación
+            if (typeof elevationChart !== 'undefined' && elevationChart) {
+                if (elevationChart.options.scales.x) {
+                    elevationChart.options.scales.x.grid.color = gridColor;
+                    elevationChart.options.scales.x.ticks.color = tickColor;
+                }
+                if (elevationChart.options.scales.y) {
+                    elevationChart.options.scales.y.grid.color = gridColor;
+                    elevationChart.options.scales.y.ticks.color = tickColor;
+                }
+                if (elevationChart.options.plugins && elevationChart.options.plugins.legend) {
+                    elevationChart.options.plugins.legend.labels.color = tickColor;
+                }
+                elevationChart.update();
+            }
+
+            // Demanda Metabólica
+            if (typeof metabolicChart !== 'undefined' && metabolicChart) {
+                if (metabolicChart.options.scales.x) {
+                    metabolicChart.options.scales.x.grid.color = gridColor;
+                    metabolicChart.options.scales.x.ticks.color = tickColor;
+                }
+                if (metabolicChart.options.scales.y) {
+                    metabolicChart.options.scales.y.grid.color = gridColor;
+                }
+                if (metabolicChart.options.plugins && metabolicChart.options.plugins.legend) {
+                    metabolicChart.options.plugins.legend.labels.color = tickColor;
+                }
+                metabolicChart.update();
+            }
+
+            // Cuadrantes de Torque Biomecánico
+            if (typeof updateQuadrantChartTheme === 'function') {
+                updateQuadrantChartTheme(theme);
+            }
+
+            // Salud y Carga (CTL/ATL/TSB)
+            if (typeof healthLoadChart !== 'undefined' && healthLoadChart) {
+                if (healthLoadChart.options.scales.x) {
+                    healthLoadChart.options.scales.x.grid.color = gridColor;
+                    healthLoadChart.options.scales.x.ticks.color = tickColor;
+                }
+                if (healthLoadChart.options.scales.y) {
+                    healthLoadChart.options.scales.y.grid.color = gridColor;
+                    healthLoadChart.options.scales.y.ticks.color = tickColor;
+                }
+                if (healthLoadChart.options.plugins && healthLoadChart.options.plugins.legend) {
+                    healthLoadChart.options.plugins.legend.labels.color = tickColor;
+                }
+                healthLoadChart.update();
+            }
+        }
+
+        function initThemeToggle() {
+            const btn = document.getElementById('btnThemeToggle');
+            const savedTheme = localStorage.getItem('profile_theme') || localStorage.getItem('theme') || 'light';
+            applyTheme(savedTheme);
+
+            if (btn && !btn.dataset.themeBound) {
+                btn.dataset.themeBound = 'true';
+                btn.addEventListener('click', () => {
+                    const isCurrentlyDark = document.documentElement.getAttribute('data-theme') === 'dark';
+                    const newTheme = isCurrentlyDark ? 'light' : 'dark';
+                    applyTheme(newTheme);
+                });
+            }
         }
 
         function initRiderCards() {
@@ -4806,12 +5130,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                     else if (activeMetric === 'kjkg_h') unit = ' kJ/kg/h';
                                     else if (activeMetric === 'hr') unit = ' bpm';
                                     else if (activeMetric === 'cda') unit = ' m²';
+                                    else if (activeMetric === 'trq') unit = ' N·m';
+                                    else if (activeMetric === 'aepf') unit = ' N';
                                     else if (activeMetric === 'temp') unit = ' °C';
                                     else if (activeMetric === 'headwind') unit = ' km/h';
 
                                     let formattedVal = item.raw.y;
                                     if (activeMetric === 'cda' && item.raw && item.raw.y !== undefined) {
                                         formattedVal = Number(item.raw.y).toFixed(3);
+                                    } else if (activeMetric === 'trq' && item.raw && item.raw.y !== undefined) {
+                                        formattedVal = Number(item.raw.y).toFixed(1);
+                                    } else if (activeMetric === 'aepf' && item.raw && item.raw.y !== undefined) {
+                                        const kgf = (Number(item.raw.y) / 9.80665).toFixed(1);
+                                        return `${item.dataset.label}: ${Math.round(item.raw.y)} N (${kgf} kgf)`;
                                     } else if (activeMetric === 'temp' && item.raw && item.raw.y !== undefined) {
                                         formattedVal = Number(item.raw.y).toFixed(1);
                                     } else if (activeMetric === 'headwind' && item.raw && item.raw.y !== undefined) {
@@ -4850,6 +5181,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             else if (activeMetric === 'kjkg_h') unit = ' kJ/kg/h';
             else if (activeMetric === 'hr') unit = ' bpm';
             else if (activeMetric === 'cda') unit = ' m²';
+            else if (activeMetric === 'trq') unit = ' N·m';
+            else if (activeMetric === 'aepf') unit = ' N';
             else if (activeMetric === 'temp') unit = ' °C';
             else if (activeMetric === 'headwind') unit = ' km/h';
 
@@ -4858,6 +5191,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(3)}${unit}`;
                     telemetryChart.options.scales.yMetric.suggestedMin = 0.15;
                     telemetryChart.options.scales.yMetric.suggestedMax = 0.60;
+                } else if (activeMetric === 'trq') {
+                    telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(0)}${unit}`;
+                    telemetryChart.options.scales.yMetric.suggestedMin = 0;
+                    telemetryChart.options.scales.yMetric.suggestedMax = 80;
+                } else if (activeMetric === 'aepf') {
+                    telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(0)}${unit}`;
+                    telemetryChart.options.scales.yMetric.suggestedMin = 0;
+                    telemetryChart.options.scales.yMetric.suggestedMax = 500;
                 } else if (activeMetric === 'temp') {
                     telemetryChart.options.scales.yMetric.ticks.callback = (v) => `${Number(v).toFixed(1)}${unit}`;
                     telemetryChart.options.scales.yMetric.suggestedMin = 15;
@@ -4887,6 +5228,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
                     else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
+                    else if (activeMetric === 'trq') val = (s.trq !== undefined) ? s.trq : 0;
+                    else if (activeMetric === 'aepf') val = (s.aepf !== undefined) ? s.aepf : 0;
                     else if (activeMetric === 'temp') val = (s.temp !== undefined) ? s.temp : 0;
                     else if (activeMetric === 'headwind') val = (s.headwind !== undefined) ? s.headwind : 0;
                     return { x: s.d_km, y: val };
@@ -4904,6 +5247,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
                     else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
+                    else if (activeMetric === 'trq') val = (s.trq !== undefined) ? s.trq : 0;
+                    else if (activeMetric === 'aepf') val = (s.aepf !== undefined) ? s.aepf : 0;
                     else if (activeMetric === 'temp') val = (s.temp !== undefined) ? s.temp : 0;
                     else if (activeMetric === 'headwind') val = (s.headwind !== undefined) ? s.headwind : 0;
                     pointDs.data = [{ x: s.d_km, y: val }];
@@ -4960,6 +5305,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     else if (activeMetric === 'kjkg_h') val = (s.kjkg_h !== undefined) ? s.kjkg_h : parseFloat((s.wkg * 3.6).toFixed(1));
                     else if (activeMetric === 'hr') val = s.hr;
                     else if (activeMetric === 'cda') val = (s.cda !== undefined) ? s.cda : 0;
+                    else if (activeMetric === 'trq') val = (s.trq !== undefined) ? s.trq : 0;
+                    else if (activeMetric === 'aepf') val = (s.aepf !== undefined) ? s.aepf : 0;
                     else if (activeMetric === 'temp') val = (s.temp !== undefined) ? s.temp : 0;
                     else if (activeMetric === 'headwind') val = (s.headwind !== undefined) ? s.headwind : 0;
                     telemetryChart.data.datasets[1 + numCiclistas + idx].data = [{ x: s.d_km, y: val }];
@@ -5206,6 +5553,413 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         if (btnToggleMapProfile) {
             btnToggleMapProfile.addEventListener('click', () => toggleMapProfile());
+        }
+
+        // =========================================================
+        // 9. Módulo de Análisis Biomecánico y Cuadrantes de Torque
+        // =========================================================
+        let quadrantChart = null;
+        let selectedTorqueRider = 'all';
+
+        // Plugin visual para sombreado y cuadrantes Coggan (QI, QII, QIII, QIV)
+        const quadrantBackgroundPlugin = {
+            id: 'quadrantBackground',
+            beforeDraw: (chart) => {
+                const { ctx, chartArea, scales } = chart;
+                if (!chartArea || !scales.x || !scales.y) return;
+                const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+
+                const cadThresh = 85;
+                let trqThresh = 42;
+                if (typeof DATA !== 'undefined' && DATA.ciclistas) {
+                    let trqVals = [];
+                    DATA.ciclistas.forEach(c => {
+                        if (c.stats && c.stats.cuadrantes && c.stats.cuadrantes.trq_thresh) {
+                            trqVals.push(c.stats.cuadrantes.trq_thresh);
+                        }
+                    });
+                    if (trqVals.length > 0) {
+                        trqThresh = trqVals.reduce((a, b) => a + b, 0) / trqVals.length;
+                    }
+                }
+
+                const xPixel = scales.x.getPixelForValue(cadThresh);
+                const yPixel = scales.y.getPixelForValue(trqThresh);
+
+                if (isNaN(xPixel) || isNaN(yPixel)) return;
+
+                const xClamped = Math.max(chartArea.left, Math.min(chartArea.right, xPixel));
+                const yClamped = Math.max(chartArea.top, Math.min(chartArea.bottom, yPixel));
+
+                ctx.save();
+
+                // 1. Zonas sombreadas según tema
+                // QI: Alta Cadencia / Alto Par (top-right)
+                ctx.fillStyle = isDark ? 'rgba(245, 158, 11, 0.05)' : 'rgba(245, 158, 11, 0.06)';
+                ctx.fillRect(xClamped, chartArea.top, chartArea.right - xClamped, yClamped - chartArea.top);
+
+                // QII: Baja Cadencia / Alto Par (top-left)
+                ctx.fillStyle = isDark ? 'rgba(236, 72, 153, 0.05)' : 'rgba(236, 72, 153, 0.06)';
+                ctx.fillRect(chartArea.left, chartArea.top, xClamped - chartArea.left, yClamped - chartArea.top);
+
+                // QIII: Baja Cadencia / Bajo Par (bottom-left)
+                ctx.fillStyle = isDark ? 'rgba(148, 163, 184, 0.04)' : 'rgba(100, 90, 120, 0.04)';
+                ctx.fillRect(chartArea.left, yClamped, xClamped - chartArea.left, chartArea.bottom - yClamped);
+
+                // QIV: Alta Cadencia / Bajo Par (bottom-right)
+                ctx.fillStyle = isDark ? 'rgba(16, 185, 129, 0.05)' : 'rgba(2, 132, 199, 0.06)';
+                ctx.fillRect(xClamped, yClamped, chartArea.right - xClamped, chartArea.bottom - yClamped);
+
+                // 2. Líneas divisorias de umbral
+                ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.22)' : 'rgba(124, 58, 237, 0.22)';
+                ctx.lineWidth = 1.2;
+                ctx.setLineDash([4, 4]);
+
+                // Umbral de cadencia (85 rpm)
+                ctx.beginPath();
+                ctx.moveTo(xClamped, chartArea.top);
+                ctx.lineTo(xClamped, chartArea.bottom);
+                ctx.stroke();
+
+                // Umbral de torque (~42 N·m)
+                ctx.beginPath();
+                ctx.moveTo(chartArea.left, yClamped);
+                ctx.lineTo(chartArea.right, yClamped);
+                ctx.stroke();
+
+                // 3. Marcas de agua de cuadrantes
+                ctx.font = '600 11px Outfit, sans-serif';
+                ctx.setLineDash([]);
+
+                // QII (Top-Left)
+                ctx.fillStyle = isDark ? 'rgba(236, 72, 153, 0.8)' : 'rgba(219, 39, 119, 0.9)';
+                ctx.textAlign = 'left';
+                ctx.fillText('QII: Escalada Dura', chartArea.left + 10, chartArea.top + 18);
+
+                // QI (Top-Right)
+                ctx.fillStyle = isDark ? 'rgba(245, 158, 11, 0.8)' : 'rgba(217, 119, 6, 0.9)';
+                ctx.textAlign = 'right';
+                ctx.fillText('QI: Sprint / Ataque', chartArea.right - 10, chartArea.top + 18);
+
+                // QIII (Bottom-Left)
+                ctx.fillStyle = isDark ? 'rgba(148, 163, 184, 0.75)' : 'rgba(100, 90, 120, 0.85)';
+                ctx.textAlign = 'left';
+                ctx.fillText('QIII: Recuperación', chartArea.left + 10, chartArea.bottom - 10);
+
+                // QIV (Bottom-Right)
+                ctx.fillStyle = isDark ? 'rgba(16, 185, 129, 0.8)' : 'rgba(2, 132, 199, 0.9)';
+                ctx.textAlign = 'right';
+                ctx.fillText('QIV: Pelotón Ágil', chartArea.right - 10, chartArea.bottom - 10);
+
+                ctx.restore();
+            }
+        };
+
+        function initTorqueSection() {
+            renderTorqueKPIs();
+            populateTorqueRiderSelect();
+            initQuadrantScatterChart();
+            renderTorqueTable();
+        }
+
+        function renderTorqueKPIs() {
+            const container = document.getElementById('torqueKpisContainer');
+            if (!container) return;
+
+            let maxTrq = 0;
+            let riderMaxTrq = '--';
+            let sumTrq = 0;
+            let sumAepf = 0;
+            let countTrq = 0;
+            let sumQ1 = 0, sumQ2 = 0, sumQ3 = 0, sumQ4 = 0;
+
+            DATA.ciclistas.forEach(c => {
+                const s = c.stats;
+                if (s.torque_max_nm && s.torque_max_nm > maxTrq) {
+                    maxTrq = s.torque_max_nm;
+                    riderMaxTrq = s.nombre;
+                }
+                if (s.torque_media_nm) {
+                    sumTrq += s.torque_media_nm;
+                    sumAepf += (s.aepf_media_n || 0);
+                    countTrq++;
+                }
+                if (s.cuadrantes && s.cuadrantes.cuadrantes) {
+                    const q = s.cuadrantes.cuadrantes;
+                    sumQ1 += (q.q1_pct || 0);
+                    sumQ2 += (q.q2_pct || 0);
+                    sumQ3 += (q.q3_pct || 0);
+                    sumQ4 += (q.q4_pct || 0);
+                }
+            });
+
+            const avgTrq = countTrq > 0 ? (sumTrq / countTrq).toFixed(1) : '--';
+            const avgAepf = countTrq > 0 ? Math.round(sumAepf / countTrq) : '--';
+            const avgKgf = countTrq > 0 ? (sumAepf / countTrq / 9.80665).toFixed(1) : '--';
+            const avgQ1 = countTrq > 0 ? (sumQ1 / countTrq).toFixed(1) : '0';
+            const avgQ2 = countTrq > 0 ? (sumQ2 / countTrq).toFixed(1) : '0';
+            const avgQ3 = countTrq > 0 ? (sumQ3 / countTrq).toFixed(1) : '0';
+            const avgQ4 = countTrq > 0 ? (sumQ4 / countTrq).toFixed(1) : '0';
+
+            container.innerHTML = `
+                <div class="torque-kpi-card">
+                    <div class="torque-kpi-header">
+                        <span class="torque-kpi-lbl">Par Máximo (Equipo)</span>
+                        <i data-lucide="zap" style="width: 16px; height: 16px; color: #d97706;"></i>
+                    </div>
+                    <div class="torque-kpi-val" style="color: #d97706;">${maxTrq} <span style="font-size: 0.85rem; font-weight: 500;">N·m</span></div>
+                    <div class="torque-kpi-sub">🏆 ${riderMaxTrq}</div>
+                </div>
+                <div class="torque-kpi-card">
+                    <div class="torque-kpi-header">
+                        <span class="torque-kpi-lbl">Torque Medio Pedaleando</span>
+                        <i data-lucide="gauge" style="width: 16px; height: 16px; color: #0284c7;"></i>
+                    </div>
+                    <div class="torque-kpi-val" style="color: #0284c7;">${avgTrq} <span style="font-size: 0.85rem; font-weight: 500;">N·m</span></div>
+                    <div class="torque-kpi-sub">Fuerza: <strong style="color: var(--text-main);">${avgAepf} N</strong> (${avgKgf} kgf)</div>
+                </div>
+                <div class="torque-kpi-card">
+                    <div class="torque-kpi-header">
+                        <span class="torque-kpi-lbl">Cuadrante I (Sprint/Ataque)</span>
+                        <i data-lucide="flame" style="width: 16px; height: 16px; color: #ea580c;"></i>
+                    </div>
+                    <div class="torque-kpi-val" style="color: #ea580c;">${avgQ1}% <span style="font-size: 0.82rem; font-weight: 500; color: var(--text-muted);">tiempo</span></div>
+                    <div class="torque-kpi-sub">Alta cadencia (&gt;85) y alto par</div>
+                </div>
+                <div class="torque-kpi-card">
+                    <div class="torque-kpi-header">
+                        <span class="torque-kpi-lbl">Cuadrante II (Escalada Dura)</span>
+                        <i data-lucide="mountain" style="width: 16px; height: 16px; color: #db2777;"></i>
+                    </div>
+                    <div class="torque-kpi-val" style="color: #db2777;">${avgQ2}% <span style="font-size: 0.82rem; font-weight: 500; color: var(--text-muted);">tiempo</span></div>
+                    <div class="torque-kpi-sub">Baja cadencia (&lt;85) y alto par</div>
+                </div>
+                <div class="torque-kpi-card">
+                    <div class="torque-kpi-header">
+                        <span class="torque-kpi-lbl">Cuadrante IV (Pelotón Ágil)</span>
+                        <i data-lucide="users" style="width: 16px; height: 16px; color: #059669;"></i>
+                    </div>
+                    <div class="torque-kpi-val" style="color: #059669;">${avgQ4}% <span style="font-size: 0.82rem; font-weight: 500; color: var(--text-muted);">tiempo</span></div>
+                    <div class="torque-kpi-sub">Rodar protegido a alta cadencia</div>
+                </div>
+            `;
+            if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons();
+        }
+
+        function populateTorqueRiderSelect() {
+            const sel = document.getElementById('torqueRiderSelect');
+            if (!sel) return;
+            sel.innerHTML = '<option value="all">Todos los Ciclistas</option>';
+            DATA.ciclistas.forEach((c, idx) => {
+                const opt = document.createElement('option');
+                opt.value = String(idx);
+                opt.innerText = c.stats.nombre;
+                sel.appendChild(opt);
+            });
+            sel.addEventListener('change', (e) => {
+                selectedTorqueRider = e.target.value;
+                updateQuadrantScatterChart();
+            });
+        }
+
+        function buildQuadrantDatasets() {
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            const datasets = [];
+
+            // Isolíneas de potencia de referencia
+            const cadSeq = [];
+            for (let cd = 35; cd <= 125; cd += 3) cadSeq.push(cd);
+            const potenciasRef = [200, 300, 400];
+            const isoColors = isDark
+                ? ['rgba(148, 163, 184, 0.45)', 'rgba(56, 189, 248, 0.65)', 'rgba(245, 158, 11, 0.7)']
+                : ['rgba(100, 90, 120, 0.6)', 'rgba(2, 132, 199, 0.75)', 'rgba(217, 119, 6, 0.8)'];
+
+            potenciasRef.forEach((pwr, pIdx) => {
+                datasets.push({
+                    label: `${pwr}W`,
+                    data: cadSeq.map(cd => ({ x: cd, y: parseFloat((pwr / (cd * 2 * Math.PI / 60)).toFixed(1)) })),
+                    showLine: true,
+                    borderColor: isoColors[pIdx],
+                    borderWidth: 1.5,
+                    borderDash: [5, 5],
+                    pointRadius: 0,
+                    pointHoverRadius: 0,
+                    fill: false,
+                    isIsoLine: true,
+                    order: 90
+                });
+            });
+
+            // Puntos de los ciclistas
+            DATA.ciclistas.forEach((c, idx) => {
+                if (selectedTorqueRider !== 'all' && selectedTorqueRider !== String(idx)) return;
+                const pts = (c.stats.cuadrantes && c.stats.cuadrantes.puntos) ? c.stats.cuadrantes.puntos : [];
+                datasets.push({
+                    label: c.stats.nombre,
+                    data: pts.map(pt => ({ x: pt.cad, y: pt.trq, pwr: pt.pwr, aepf: pt.aepf, q: pt.q })),
+                    backgroundColor: c.stats.color,
+                    borderColor: c.stats.color,
+                    pointRadius: selectedTorqueRider !== 'all' ? 3.5 : 2.5,
+                    pointHoverRadius: 6,
+                    order: 10
+                });
+            });
+
+            return datasets;
+        }
+
+        function initQuadrantScatterChart() {
+            const canvasEl = document.getElementById('quadrantScatterChart');
+            if (!canvasEl) return;
+            const ctx = canvasEl.getContext('2d');
+
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(124, 58, 237, 0.08)';
+            const tickColor = isDark ? '#a89ec4' : '#645a78';
+            const titleColor = isDark ? '#f8fafc' : '#1e152d';
+            const legendColor = isDark ? '#f8fafc' : '#1e152d';
+
+            const datasets = buildQuadrantDatasets();
+
+            quadrantChart = new Chart(ctx, {
+                type: 'scatter',
+                data: { datasets: datasets },
+                plugins: [quadrantBackgroundPlugin],
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: { duration: 400 },
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            title: { display: true, text: 'Cadencia de Pedaleo (rpm)', color: titleColor, font: { family: 'Outfit', size: 12, weight: '600' } },
+                            min: 30,
+                            max: 130,
+                            grid: { color: gridColor },
+                            ticks: { color: tickColor, font: { family: 'JetBrains Mono', size: 11 } }
+                        },
+                        y: {
+                            type: 'linear',
+                            title: { display: true, text: 'Torque en Bielas (N·m)', color: titleColor, font: { family: 'Outfit', size: 12, weight: '600' } },
+                            min: 0,
+                            suggestedMax: 90,
+                            grid: { color: gridColor },
+                            ticks: {
+                                color: tickColor,
+                                font: { family: 'JetBrains Mono', size: 11 },
+                                callback: (v) => `${v} N·m`
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: { color: legendColor, font: { family: 'Outfit', size: 12, weight: '500' }, usePointStyle: true }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(30, 21, 45, 0.95)',
+                            titleColor: '#38bdf8',
+                            bodyColor: '#f8fafc',
+                            borderWidth: 1,
+                            borderColor: 'rgba(124, 58, 237, 0.25)',
+                            callbacks: {
+                                label: (ctx) => {
+                                    if (ctx.dataset.isIsoLine) {
+                                        return `⚡ Curva Iso-Potencia: ${ctx.dataset.label}`;
+                                    }
+                                    const p = ctx.raw;
+                                    const riderName = ctx.dataset.label || 'Ciclista';
+                                    const pwrStr = p.pwr ? ` • ${p.pwr} W` : '';
+                                    const aepfStr = p.aepf ? ` (${p.aepf} N)` : '';
+                                    const qNames = ['', 'QI (Sprint)', 'QII (Escalada)', 'QIII (Recup)', 'QIV (Pelotón)'];
+                                    const qStr = p.q ? ` • ${qNames[p.q] || ''}` : '';
+                                    return `${riderName}: ${p.y} N·m${aepfStr} @ ${p.x} rpm${pwrStr}${qStr}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateQuadrantChartTheme(theme) {
+            if (!quadrantChart) return;
+            const isDark = theme === 'dark';
+            const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(124, 58, 237, 0.08)';
+            const tickColor = isDark ? '#a89ec4' : '#645a78';
+            const titleColor = isDark ? '#f8fafc' : '#1e152d';
+            const legendColor = isDark ? '#f8fafc' : '#1e152d';
+
+            if (quadrantChart.options.scales.x) {
+                quadrantChart.options.scales.x.grid.color = gridColor;
+                quadrantChart.options.scales.x.ticks.color = tickColor;
+                if (quadrantChart.options.scales.x.title) {
+                    quadrantChart.options.scales.x.title.color = titleColor;
+                }
+            }
+            if (quadrantChart.options.scales.y) {
+                quadrantChart.options.scales.y.grid.color = gridColor;
+                quadrantChart.options.scales.y.ticks.color = tickColor;
+                if (quadrantChart.options.scales.y.title) {
+                    quadrantChart.options.scales.y.title.color = titleColor;
+                }
+            }
+            if (quadrantChart.options.plugins && quadrantChart.options.plugins.legend) {
+                quadrantChart.options.plugins.legend.labels.color = legendColor;
+            }
+
+            const isoColors = isDark 
+                ? ['rgba(148, 163, 184, 0.45)', 'rgba(56, 189, 248, 0.65)', 'rgba(245, 158, 11, 0.7)']
+                : ['rgba(100, 90, 120, 0.6)', 'rgba(2, 132, 199, 0.75)', 'rgba(217, 119, 6, 0.8)'];
+
+            let isoIdx = 0;
+            quadrantChart.data.datasets.forEach(ds => {
+                if (ds.isIsoLine) {
+                    ds.borderColor = isoColors[isoIdx % isoColors.length];
+                    isoIdx++;
+                }
+            });
+
+            quadrantChart.update();
+        }
+
+        function updateQuadrantScatterChart() {
+            if (!quadrantChart) return;
+            quadrantChart.data.datasets = buildQuadrantDatasets();
+            quadrantChart.update();
+        }
+
+        function renderTorqueTable() {
+            const tbody = document.getElementById('torqueTableBody');
+            if (!tbody) return;
+            tbody.innerHTML = '';
+
+            DATA.ciclistas.forEach((c, idx) => {
+                const s = c.stats;
+                const mmt = s.torque_mmt || {};
+                const q = (s.cuadrantes && s.cuadrantes.cuadrantes) ? s.cuadrantes.cuadrantes : {};
+
+                const mmt1s = mmt[1] ? `${mmt[1]} N·m` : '--';
+                const mmt5s = mmt[5] ? `${mmt[5]} N·m` : '--';
+                const mmt30s = mmt[30] ? `${mmt[30]} N·m` : '--';
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td style="text-align: center; color: var(--text-muted); font-weight: bold;">${idx + 1}</td>
+                    <td><div class="rider-tag"><span class="rider-dot" style="--dot-color: ${s.color};"></span> ${s.nombre}</div></td>
+                    <td><strong style="color: #0284c7;">${s.torque_media_nm || '--'} N·m</strong></td>
+                    <td><strong style="color: #d97706;">${s.torque_max_nm || '--'} N·m</strong></td>
+                    <td><strong style="color: var(--text-main);">${s.aepf_media_n || '--'} N</strong> <span style="font-size: 0.72rem; color: var(--text-muted);">(${s.kgf_media || '--'} kgf)</span></td>
+                    <td><strong style="color: #e11d48;">${mmt1s}</strong></td>
+                    <td><strong style="color: #ea580c;">${mmt5s}</strong></td>
+                    <td><strong style="color: #d97706;">${mmt30s}</strong></td>
+                    <td><span style="color: #d97706; font-weight: 600;">${q.q1_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q1_sec || 0}s)</span></td>
+                    <td><span style="color: #db2777; font-weight: 600;">${q.q2_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q2_sec || 0}s)</span></td>
+                    <td><span style="color: var(--text-muted);">${q.q3_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q3_sec || 0}s)</span></td>
+                    <td><span style="color: #059669; font-weight: 600;">${q.q4_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q4_sec || 0}s)</span></td>
+                `;
+                tbody.appendChild(tr);
+            });
         }
 
         // =========================================================
@@ -5899,6 +6653,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             initSummaryTable();
             initSegmentAnalysis();
             initMetabolicSection();
+            initTorqueSection();
             initHealthSection();
             initMap();
             initElevationChart();
@@ -5910,72 +6665,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.addEventListener('DOMContentLoaded', initApp);
         } else {
             initApp();
-        }
-
-        // ==========================================
-        // THEME TOGGLE LOGIC
-        // ==========================================
-        const btnThemeToggle = document.getElementById('btnThemeToggle');
-        const iconTheme = document.getElementById('iconTheme');
-        
-        function applyTheme(theme) {
-            document.documentElement.setAttribute('data-theme', theme);
-            if (iconTheme) {
-                iconTheme.setAttribute('data-lucide', theme === 'dark' ? 'sun' : 'moon');
-                if (typeof lucide !== 'undefined' && lucide.createIcons) lucide.createIcons();
-            }
-            
-            // Update Map Tiles if map exists
-            if (window.map) {
-                const layerGroup = window.mapLayers;
-                if (layerGroup) {
-                    layerGroup.clearLayers();
-                    const tileUrl = theme === 'dark' 
-                        ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-                        : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png';
-                    L.tileLayer(tileUrl, {
-                        attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-                        subdomains: 'abcd',
-                        maxZoom: 20
-                    }).addTo(layerGroup);
-                }
-            }
-            
-            // Update Chart.js if exists
-            if (window.telemetryChart) {
-                const gridColor = theme === 'dark' ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
-                const textColor = theme === 'dark' ? '#94a3b8' : '#64748b';
-                
-                Chart.defaults.color = textColor;
-                Chart.defaults.borderColor = gridColor;
-                
-                if (window.telemetryChart.options.scales.x) {
-                    window.telemetryChart.options.scales.x.grid.color = gridColor;
-                    window.telemetryChart.options.scales.x.ticks.color = textColor;
-                }
-                if (window.telemetryChart.options.scales.y) {
-                    window.telemetryChart.options.scales.y.grid.color = gridColor;
-                    window.telemetryChart.options.scales.y.ticks.color = textColor;
-                }
-                
-                window.telemetryChart.update();
-            }
-        }
-
-        // Initialize Theme
-        let currentTheme = localStorage.getItem('theme');
-        if (!currentTheme) {
-            // Default to light as per variables, or system pref
-            currentTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-        }
-        applyTheme(currentTheme);
-
-        if (btnThemeToggle) {
-            btnThemeToggle.addEventListener('click', () => {
-                currentTheme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-                localStorage.setItem('theme', currentTheme);
-                applyTheme(currentTheme);
-            });
         }
     </script>
 
