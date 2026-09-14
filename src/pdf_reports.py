@@ -986,8 +986,8 @@ def generar_informe_etapa_pdf(
                 ax_quad.scatter(xs, ys, color=col, alpha=0.65, s=14, edgecolors='none', label=nom)
 
         ax_quad.set_title("Diagrama de Cuadrantes (Coggan Quadrant Analysis)", fontsize=11, fontweight='bold', pad=8, color='#0f172a')
-        ax_quad.set_xlabel("Cadencia de Pedaleo (rpm)", fontsize=9, fontweight='600', color='#475569')
-        ax_quad.set_ylabel("Torque en Bielas (N·m)", fontsize=9, fontweight='600', color='#475569')
+        ax_quad.set_xlabel("Cadencia de Pedaleo (rpm)", fontsize=9, fontweight='bold', color='#475569')
+        ax_quad.set_ylabel("Torque en Bielas (N·m)", fontsize=9, fontweight='bold', color='#475569')
         ax_quad.set_xlim(30, 130)
         ax_quad.set_ylim(0, 85)
         ax_quad.grid(True, linestyle='--', alpha=0.3, color='#94a3b8')

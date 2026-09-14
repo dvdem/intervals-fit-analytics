@@ -64,7 +64,7 @@ DEFAULT_PEAK_DURATIONS = {
 }
 
 # Constantes para análisis biomecánico y de torque
-DEFAULT_CRANK_LENGTH = 0.1725               # Longitud de biela estándar en metros (172.5 mm)
+DEFAULT_CRANK_LENGTH = 0.1700               # Longitud de biela estándar en metros (170 mm)
 DEFAULT_QUADRANT_CADENCE_THRESH = 85.0       # Cadencia umbral para análisis de cuadrantes (rpm)
 DEFAULT_TORQUE_PEAK_DURATIONS = {
     1: "1s",
@@ -72,7 +72,8 @@ DEFAULT_TORQUE_PEAK_DURATIONS = {
     10: "10s",
     30: "30s",
     60: "1m",
-    300: "5m"
+    300: "5m",
+    1200:"20m"
 }
 
 

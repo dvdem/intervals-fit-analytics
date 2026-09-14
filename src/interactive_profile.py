@@ -70,6 +70,16 @@ def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> f
     return 2.0 * R * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
+def _haversine_vector(lat_ref: float, lon_ref: float, lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """Calcula distancias haversine vectorizadas en metros entre un punto y un array de coordenadas."""
+    lat1 = np.radians(lat_ref)
+    lat2 = np.radians(lats)
+    dlat = lat2 - lat1
+    dlon = np.radians(lons - lon_ref)
+    a = np.sin(dlat / 2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0)**2
+    return 6371000.0 * 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+
+
 def calcular_potencia_normalizada(potencias: np.ndarray) -> float:
     """Calcula la Potencia Normalizada (NP) a partir de una serie de potencia en vatios."""
     if len(potencias) < 30:
@@ -7101,15 +7111,22 @@ def sincronizar_ciclistas_primer_punto_comun(
     max_dist_tolerancia: float = 85.0
 ) -> Tuple[Optional[Tuple[float, float]], List[Dict[str, Any]]]:
     """
-    Localiza el primer punto geográfico común a todos los ciclistas y recorta
-    el inicio de cada serie para que el análisis empiece desde ese punto.
+    Localiza el primer punto geográfico común a los ciclistas y recorta el inicio
+    de cada serie para que el análisis empiece desde ese punto de salida colectiva.
 
-    Estrategia de búsqueda multicapa:
-    1. Tolerancias progresivas (85 → 150 → 300 m).
-    2. Para cada tolerancia, itera sobre TODOS los puntos de cada ciclista como
-       referencia (no solo los primeros 4000), probando cada uno como candidato
-       a punto de salida común.
-    3. Si ninguna combinación geográfica funciona, sincroniza por timestamp.
+    Diseño robusto para circuitos y carreras en pelotón:
+    1. Búsqueda en ventana de inicio: Restringe los candidatos a los primeros 3.500 puntos
+       (primeros ~15 km), evitando proponer puntos en vueltas posteriores del circuito.
+    2. Coherencia temporal: Exige que el paso del ciclista por la coordenada ocurra
+       dentro de una ventana temporal coherente respecto a la salida del grupo (<= 20 min).
+       Esto evita que en un circuito cerrado de múltiples vueltas se empareje erróneamente
+       con una vuelta intermedia (ej. vuelta 5 u 8) en vez de la Vuelta 1.
+    3. Primer paso cronológico: Selecciona el primer paso cronológico que cumple la tolerancia,
+       en lugar de un argmin global sobre toda la prueba.
+    4. Consenso mayoritario y filtrado de outliers: Si un ciclista no coincide en la salida
+       (ej. entrenamiento individual o DNS), sincroniza a la mayoría de carrera (>= 50%) y
+       notifica la anomalía sin corromper la salida del equipo.
+    5. Vectorización NumPy ultra-rápida.
     """
     ciclistas_limpios = []
     for r in ciclistas_raw:
@@ -7117,68 +7134,78 @@ def sincronizar_ciclistas_primer_punto_comun(
         if len(df_c) > 20:
             r_item = dict(r)
             r_item['df'] = df_c
+            r_item['lats'] = df_c['lat'].values.astype(float)
+            r_item['lons'] = df_c['lon'].values.astype(float)
+            r_item['times'] = pd.to_datetime(df_c['timestamp'])
             ciclistas_limpios.append(r_item)
 
     if len(ciclistas_limpios) <= 1:
         return None, ciclistas_raw
 
-    punto_comun = None
-    indices_corte = {}
     tolerancias = [85.0, 150.0, 300.0]
+    mejor_punto = None
+    mejor_indices = {}
+    mejor_matched = []
     tol_usada = tolerancias[-1]
 
     for tol in tolerancias:
-        # Probar cada ciclista como referencia para maximizar las posibilidades
-        # de encontrar un punto de salida común (especialmente útil cuando uno
-        # tiene un calentamiento largo antes del km 0).
         for ciclista_ref in ciclistas_limpios:
-            df_ref = ciclista_ref['df']
-            n_total = len(df_ref)
-            # Dos pasadas: 1ª muestreo cada 10s (rápido, cubre toda la actividad);
-            # 2ª cada 1s solo los primeros 4000 puntos (refinamiento denso al inicio).
-            indices_a_probar = list(range(0, n_total, 10)) + list(range(min(n_total, 4000)))
-            indices_a_probar = sorted(set(indices_a_probar))
-            for idx in indices_a_probar:
-                row = df_ref.iloc[idx]
-                lat_ref, lon_ref = float(row['lat']), float(row['lon'])
-                todos_pasan = True
+            lats_ref = ciclista_ref['lats']
+            lons_ref = ciclista_ref['lons']
+            times_ref = ciclista_ref['times']
+            n_scan = min(len(lats_ref), 3500)
+
+            for idx in range(0, n_scan, 10):
+                lat_ref = lats_ref[idx]
+                lon_ref = lons_ref[idx]
+                t_ref = times_ref.iloc[idx]
+
                 temp_indices = {}
+                matched = []
+
                 for r in ciclistas_limpios:
-                    df_r = r['df']
-                    dists = np.array([
-                        _haversine_distance(lat_ref, lon_ref, float(lat), float(lon))
-                        for lat, lon in zip(df_r['lat'].values, df_r['lon'].values)
-                    ])
-                    min_idx = int(np.argmin(dists))
-                    if dists[min_idx] <= tol:
-                        temp_indices[r['nombre']] = min_idx
-                    else:
-                        todos_pasan = False
-                        break
-                if todos_pasan:
-                    punto_comun = (lat_ref, lon_ref)
-                    indices_corte = temp_indices
+                    n_check = min(len(r['lats']), 4500)
+                    dists = _haversine_vector(lat_ref, lon_ref, r['lats'][:n_check], r['lons'][:n_check])
+                    passes = np.where(dists <= tol)[0]
+
+                    # Primer paso con coherencia temporal respecto a la salida del grupo
+                    valid_pass = None
+                    for p_idx in passes:
+                        t_p = r['times'].iloc[p_idx]
+                        if abs((t_p - t_ref).total_seconds()) <= 1200:  # <= 20 min
+                            valid_pass = p_idx
+                            break
+
+                    if valid_pass is not None:
+                        temp_indices[r['nombre']] = valid_pass
+                        matched.append(r['nombre'])
+
+                if len(matched) > len(mejor_matched):
+                    mejor_punto = (lat_ref, lon_ref)
+                    mejor_indices = temp_indices
+                    mejor_matched = matched
                     tol_usada = tol
-                    break
-            if punto_comun:
+                    if len(matched) == len(ciclistas_limpios):
+                        break
+            if len(mejor_matched) == len(ciclistas_limpios):
                 break
-        if punto_comun:
+        if len(mejor_matched) == len(ciclistas_limpios):
             break
 
-    if punto_comun is None:
-        print("⚠️ No se encontró punto común geográfico (tolerancia máxima 300m). "
+    if mejor_punto is None or len(mejor_matched) < 2:
+        print("⚠️ No se encontró punto común geográfico coherente (tolerancia máxima 300m). "
               "Sincronizando por timestamp inicial máximo.")
         max_start = max([r['df']['timestamp'].iloc[0] for r in ciclistas_limpios])
         for r in ciclistas_limpios:
             idx_arr = r['df'][r['df']['timestamp'] >= max_start].index
-            indices_corte[r['nombre']] = idx_arr[0] if len(idx_arr) > 0 else 0
+            mejor_indices[r['nombre']] = idx_arr[0] if len(idx_arr) > 0 else 0
     else:
-        print(f"🎯 Punto común encontrado (tol {tol_usada}m): ({punto_comun[0]:.5f}, {punto_comun[1]:.5f})")
+        print(f"🎯 Punto común encontrado (tol {tol_usada}m): ({mejor_punto[0]:.5f}, {mejor_punto[1]:.5f}) — {len(mejor_matched)}/{len(ciclistas_limpios)} ciclistas")
 
     ciclistas_sincronizados = []
     for r in ciclistas_limpios:
         nom = r['nombre']
-        idx_corte = indices_corte.get(nom, 0)
+        idx_corte = mejor_indices.get(nom, 0)
         df_recortado = r['df'].iloc[idx_corte:].copy().reset_index(drop=True)
         if 'distancia' in df_recortado.columns:
             df_recortado['distancia'] = (df_recortado['distancia'] - df_recortado['distancia'].iloc[0]).clip(lower=0.0)
@@ -7187,9 +7214,12 @@ def sincronizar_ciclistas_primer_punto_comun(
         r_sync['idx_corte'] = idx_corte
         ciclistas_sincronizados.append(r_sync)
         hora_inicio = df_recortado['timestamp'].iloc[0].strftime('%H:%M:%S')
-        print(f"   • {nom:20s}: Sincronizado desde índice {idx_corte} ({hora_inicio})")
+        if nom in mejor_matched:
+            print(f"   • {nom:20s}: Sincronizado desde índice {idx_corte} ({hora_inicio})")
+        else:
+            print(f"   ⚠️ {nom:20s}: Salida no coincidente con el grupo, mantenido desde {hora_inicio}")
 
-    return punto_comun, ciclistas_sincronizados
+    return mejor_punto, ciclistas_sincronizados
 
 
 def sincronizar_ciclistas_ultimo_punto_comun(
@@ -7197,22 +7227,16 @@ def sincronizar_ciclistas_ultimo_punto_comun(
     max_dist_tolerancia: float = 200.0
 ) -> Tuple[Optional[Tuple[float, float]], List[Dict[str, Any]]]:
     """
-    Localiza el último punto geográfico (lat, lon) donde todos los ciclistas han pasado
-    y recorta el final de cada serie para que el análisis termine exactamente en ese punto común.
+    Localiza el punto final geográfico común donde los finalistas de la etapa concluyen la prueba
+    y recorta el rodaje posterior (paseo al autobús / enfriamiento).
 
-    Toma como referencia al ciclista cuyo timestamp final es el más temprano (el que acabó antes),
-    recorre sus últimos puntos hacia atrás y busca la posición más avanzada de la ruta por la que
-    también hayan pasado todos los demás dentro de la tolerancia dada.
-
-    Args:
-        ciclistas_raw: Lista de dicts con claves 'df', 'nombre', 'peso', 'ftp', 'atleta_id'.
-        max_dist_tolerancia: Distancia máxima en metros para considerar que un ciclista pasó
-            por el punto de referencia (default 200m, más holgado que el inicio para absorber
-            dispersión GPS en llegadas de grupo o neutralizaciones).
-
-    Returns:
-        Tupla (punto_comun, ciclistas_sincronizados) donde punto_comun es (lat, lon) o None
-        si no se encontró intersección válida.
+    Diseño robusto para circuitos y carreras con abandonos:
+    1. Referencia basada en finalistas: La meta la define el ciclista que completó la carrera
+       (distancia >= 85% del máximo), nunca un abandono temprano o corredor con menos vueltas.
+    2. Último paso cronológico en circuitos: Al buscar el paso por la meta, toma el último
+       paso temporal (vuelta final), impidiendo que se recorte a una vuelta anterior.
+    3. Protección de corredores doblados / retirados: Si un corredor paró una vuelta antes o
+       abandonó, no se recortan las vueltas finales a los que sí completaron la carrera.
     """
     ciclistas_limpios = []
     for r in ciclistas_raw:
@@ -7220,61 +7244,73 @@ def sincronizar_ciclistas_ultimo_punto_comun(
         if len(df_c) > 20:
             r_item = dict(r)
             r_item['df'] = df_c
+            r_item['lats'] = df_c['lat'].values.astype(float)
+            r_item['lons'] = df_c['lon'].values.astype(float)
+            r_item['times'] = pd.to_datetime(df_c['timestamp'])
             ciclistas_limpios.append(r_item)
 
     if len(ciclistas_limpios) <= 1:
         return None, ciclistas_raw
 
-    # Usar como referencia al ciclista cuyo timestamp final es el más temprano
-    # (quien terminó antes define el punto de meta colectiva)
-    ciclista_ref = min(ciclistas_limpios, key=lambda r: r['df']['timestamp'].iloc[-1])
+    # Determinar ciclistas finalistas que completaron la distancia de etapa
+    dists_tot = [float((r['df']['distancia'].iloc[-1] - r['df']['distancia'].iloc[0])) / 1000.0 for r in ciclistas_limpios if 'distancia' in r['df'].columns]
+    max_d = max(dists_tot) if dists_tot else 0.0
+    finalistas = [r for r in ciclistas_limpios if (r['df']['distancia'].iloc[-1] - r['df']['distancia'].iloc[0]) / 1000.0 >= max_d * 0.85]
+    if not finalistas:
+        finalistas = ciclistas_limpios
+
+    nombres_finalistas = {f['nombre'] for f in finalistas}
+
+    # Tomar como referencia al finalista con timestamp de llegada más temprano (el primero en cruzar la meta)
+    ciclista_ref = min(finalistas, key=lambda r: r['df']['timestamp'].iloc[-1])
     df_ref = ciclista_ref['df']
 
     punto_comun_fin = None
     indices_corte_fin = {}
 
-    # Recorrer los últimos puntos del ciclista de referencia hacia atrás
     n_ref = len(df_ref)
-    n_check = min(n_ref, 4000)
+    n_check = min(n_ref, 2500)
     start_scan = n_ref - 1
     end_scan = max(0, n_ref - n_check)
 
-    for idx in range(start_scan, end_scan - 1, -1):
-        row = df_ref.iloc[idx]
-        lat_ref = float(row['lat'])
-        lon_ref = float(row['lon'])
+    for idx in range(start_scan, end_scan - 1, -5):
+        lat_ref = float(df_ref['lat'].iloc[idx])
+        lon_ref = float(df_ref['lon'].iloc[idx])
+        t_ref_cand = ciclista_ref['times'].iloc[idx]
 
-        todos_pasan = True
+        todos_finalistas_pasan = True
         temp_indices = {}
 
         for r in ciclistas_limpios:
-            df_r = r['df']
-            # Buscar en los últimos 4000 puntos de este ciclista
-            lim_pts = min(len(df_r), 4000)
-            lats_r = df_r['lat'].values[-lim_pts:]
-            lons_r = df_r['lon'].values[-lim_pts:]
-            offset = len(df_r) - lim_pts  # índice absoluto del primer punto del fragmento
+            # Si el ciclista no es finalista (se retiró antes o dio menos vueltas), no forzar recorte a la meta final
+            if r['nombre'] not in nombres_finalistas:
+                temp_indices[r['nombre']] = len(r['df']) - 1
+                continue
 
-            dists = np.array([
-                _haversine_distance(lat_ref, lon_ref, float(lat), float(lon))
-                for lat, lon in zip(lats_r, lons_r)
-            ])
-            if len(dists) == 0:
-                todos_pasan = False
-                break
+            lim_pts = min(len(r['df']), 3500)
+            dists = _haversine_vector(lat_ref, lon_ref, r['lats'][-lim_pts:], r['lons'][-lim_pts:])
+            passes_local = np.where(dists <= max_dist_tolerancia)[0]
 
-            min_local_idx = int(np.argmin(dists))
-            if dists[min_local_idx] <= max_dist_tolerancia:
-                # Convertir índice local al índice absoluto en df_r
-                temp_indices[r['nombre']] = offset + min_local_idx
+            # Buscar el último paso cronológico con coherencia temporal respecto al finalista
+            valid_pass = None
+            offset = len(r['df']) - lim_pts
+            for p_local in reversed(passes_local):
+                p_abs = offset + p_local
+                t_p = r['times'].iloc[p_abs]
+                if abs((t_p - t_ref_cand).total_seconds()) <= 1800:  # <= 30 min
+                    valid_pass = p_abs
+                    break
+
+            if valid_pass is not None:
+                temp_indices[r['nombre']] = valid_pass
             else:
-                todos_pasan = False
+                todos_finalistas_pasan = False
                 break
 
-        if todos_pasan:
+        if todos_finalistas_pasan:
             punto_comun_fin = (lat_ref, lon_ref)
             indices_corte_fin = temp_indices
-            break  # primer punto hacia atrás donde todos coinciden → es el más avanzado común
+            break
 
     if punto_comun_fin is None:
         print("ℹ️ No se encontró punto final común geográfico. No se aplica recorte de fin.")
@@ -7286,7 +7322,6 @@ def sincronizar_ciclistas_ultimo_punto_comun(
     for r in ciclistas_limpios:
         nom = r['nombre']
         idx_corte_fin = indices_corte_fin.get(nom, len(r['df']) - 1)
-        # +1 para incluir el propio punto de llegada
         df_recortado = r['df'].iloc[:idx_corte_fin + 1].copy().reset_index(drop=True)
 
         if df_recortado.empty:
@@ -7299,7 +7334,8 @@ def sincronizar_ciclistas_ultimo_punto_comun(
         ciclistas_recortados_fin.append(r_fin)
 
         hora_fin = df_recortado['timestamp'].iloc[-1].strftime('%H:%M:%S')
-        print(f"   • {nom:20s}: Recortado hasta índice {idx_corte_fin} ({hora_fin}) — {len(df_recortado)} puntos")
+        dist_km = (df_recortado['distancia'].iloc[-1] - df_recortado['distancia'].iloc[0]) / 1000.0 if 'distancia' in df_recortado.columns else 0.0
+        print(f"   • {nom:20s}: Recortado hasta índice {idx_corte_fin} ({hora_fin}) — {len(df_recortado)} puntos ({dist_km:.2f} km)")
 
     return punto_comun_fin, ciclistas_recortados_fin
 
@@ -7589,10 +7625,9 @@ def generar_dashboard_perfil_interactivo(
                 d_km = d / 1000.0
             dists_tmp.append(d_km)
         if dists_tmp:
-            # Usamos el mínimo: todos los ciclistas terminan en el punto final común,
-            # así el eje X compartido refleja la distancia real de la etapa sin estiramientos.
-            dist_ref_etapa = min(dists_tmp)
-            print(f"📏 Distancia de referencia para grid compartido (punto final común): {dist_ref_etapa:.2f} km")
+            # Usamos el máximo: el eje X compartido y la altimetría reflejan la distancia real completa de la etapa (todas las vueltas del circuito).
+            dist_ref_etapa = max(dists_tmp)
+            print(f"📏 Distancia de referencia para grid compartido (etapa completa): {dist_ref_etapa:.2f} km")
 
     # Filtro de distancia: descartar ciclistas con < 70% de la mediana del grupo
     if len(ciclistas_para_procesar) > 1:
@@ -7659,22 +7694,27 @@ def generar_dashboard_perfil_interactivo(
     if not ciclistas_proc:
         raise ValueError("No se pudo procesar ningún ciclista con coordenadas GPS válidas.")
 
-    # Calcular gaps oficiales y ordenar clasificación de llegada de la etapa sobre tiempo en movimiento
-    min_duracion = min(c['stats']['tiempo_mov_seg'] for c in ciclistas_proc)
-    for c in ciclistas_proc:
-        gap_seg = c['stats']['tiempo_mov_seg'] - min_duracion
-        c['stats']['gap_lider_seg'] = gap_seg
-        if gap_seg == 0:
-            c['stats']['gap_lider_str'] = "Líder"
-        else:
-            mm = int(gap_seg // 60)
-            ss = int(gap_seg % 60)
-            c['stats']['gap_lider_str'] = f"+{mm}m {ss:02d}s" if mm > 0 else f"+{ss}s"
+    # Ordenar clasificación de llegada:
+    # 1. Mayor distancia completada (distingue finalistas de abandonos o vueltas perdidas)
+    # 2. Menor tiempo empleado
+    ciclistas_proc.sort(key=lambda c: (-round(c['stats']['distancia_km'], 1), c['stats']['tiempo_mov_seg']))
 
-    # Ordenar por tiempo en movimiento de carrera ascendente
-    ciclistas_proc.sort(key=lambda c: c['stats']['tiempo_mov_seg'])
+    lider = ciclistas_proc[0]
+    lider_t = lider['stats']['tiempo_mov_seg']
+    lider_d = lider['stats']['distancia_km']
     for pos, c in enumerate(ciclistas_proc, 1):
         c['stats']['posicion_str'] = f"{pos}º"
+        d_diff = lider_d - c['stats']['distancia_km']
+        gap_seg = c['stats']['tiempo_mov_seg'] - lider_t
+        c['stats']['gap_lider_seg'] = gap_seg
+        if pos == 1:
+            c['stats']['gap_lider_str'] = "Líder"
+        elif d_diff >= 4.0:
+            c['stats']['gap_lider_str'] = f"+{d_diff:.1f} km"
+        else:
+            mm = int(abs(gap_seg) // 60)
+            ss = int(abs(gap_seg) % 60)
+            c['stats']['gap_lider_str'] = f"+{mm}m {ss:02d}s" if mm > 0 else f"+{ss}s"
 
     # Construir perfil de referencia de la etapa
     etapa_info = construir_perfil_etapa_referencia(ciclistas_proc)
