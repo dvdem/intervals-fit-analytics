@@ -1,6 +1,9 @@
 ﻿#requires -Version 5.1
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('pdf', 'docx', 'ambos')]
+    [string]$Formato = 'pdf'
+)
 
 $ErrorActionPreference = 'Stop'
 $projectDir      = 'C:\Users\echav\OneDrive\Documentos\GitHub\procyclingstats\intervals_fit_analytics'
@@ -18,21 +21,21 @@ try {
     Set-Location -LiteralPath $projectDir
 
     $global:LASTEXITCODE = 0
-    & (Join-Path $projectDir 'generar_perfil.ps1') -Fecha $today
+    & (Join-Path $projectDir 'generar_perfil.ps1') -Fecha $today -Formato $Formato
     if ($LASTEXITCODE -ne 0) {
         throw "generar_perfil.ps1 finalizo con codigo $LASTEXITCODE"
     }
 
-    # Adjunta los PDF y HTML creados o actualizados durante esta ejecucion.
+    # Adjunta los PDF, Word (.docx) y HTML creados o actualizados durante esta ejecucion.
     $attachments = @(Get-ChildItem -LiteralPath $projectDir -Recurse -File |
         Where-Object {
-            $_.Extension -in '.pdf', '.html' -and
+            $_.Extension -in '.pdf', '.docx', '.html' -and
             $_.LastWriteTime -ge $startedAt.AddSeconds(-2)
         } |
         Sort-Object FullName)
 
     if ($attachments.Count -eq 0) {
-        throw 'El proceso termino, pero no se encontraron PDF ni HTML nuevos o actualizados.'
+        throw 'El proceso termino, pero no se encontraron informes (PDF, Word o HTML) nuevos o actualizados.'
     }
 
     if (-not (Test-Path -LiteralPath $credentialFile -PathType Leaf)) {
@@ -49,7 +52,8 @@ try {
         $message.From = [System.Net.Mail.MailAddress]::new($sender)
         [void]$message.To.Add($recipient)
         $message.Subject = "Informe diario de perfil - $today"
-        $message.Body = "Se adjuntan los informes PDF y HTML generados el $today."
+        $formatosAdjuntos = ($attachments | Select-Object -ExpandProperty Extension -Unique | ForEach-Object { $_.TrimStart('.').ToUpper() }) -join ', '
+        $message.Body = "Se adjuntan los informes ($formatosAdjuntos) generados el $today."
         $message.IsBodyHtml = $false
         $message.SubjectEncoding = [System.Text.Encoding]::UTF8
         $message.BodyEncoding = [System.Text.Encoding]::UTF8

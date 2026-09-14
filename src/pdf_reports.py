@@ -240,9 +240,13 @@ def generar_informe_potencias_y_carga(
     metrics_df: pd.DataFrame,
     output_pdf: Optional[Union[str, Path]] = None,
     logo_path: Optional[Union[str, Path]] = None,
+    titulo: Optional[str] = None,
+    subtitulo: Optional[str] = None,
+    grupo_carrera: Optional[Union[int, str]] = None,
 ) -> Path:
     """
     Genera el PDF de 2 páginas con el informe de picos de potencia y evolución de carga (CTL/ATL).
+    Permite especificar título personalizado o grupo de carrera para personalizar la cabecera.
     """
     output_pdf = Path(output_pdf or (OUTPUT_DIR / 'intervals_informe.pdf'))
     logo_img = _buscar_logo_img(logo_path or (_ROOT_DIR / "assets" / "LOGO.svg"))
@@ -269,6 +273,20 @@ def generar_informe_potencias_y_carga(
         for i, nombre in enumerate(nombres_metricas)
     }
 
+    # Definir títulos de cabecera en función del grupo de carrera o título explícito
+    if titulo:
+        tit_pot = titulo
+        tit_carga = f"{titulo} - Carga, Fatiga y Forma"
+    elif grupo_carrera:
+        tit_pot = f"Informe de Potencias - Carrera {grupo_carrera}"
+        tit_carga = f"Informe de Carga, Fatiga y Forma - Carrera {grupo_carrera}"
+    else:
+        tit_pot = 'Informe de Potencias'
+        tit_carga = 'Informe de Carga, Fatiga y Forma'
+
+    sub_pot = subtitulo or 'Gráfico de picos relativos y tabla resumen'
+    sub_carga = 'Evolución de CTL, ATL y TSB (Zonas de Forma) por ciclista'
+
     def crear_pagina_potencias(pdf):
         cols_count = len(tabla_pdf.columns) if not tabla_pdf.empty else 5
         fig_ancho = max(17, 7 + cols_count * 1.5)
@@ -280,21 +298,55 @@ def generar_informe_potencias_y_carga(
         gs = fig.add_gridspec(3, 1, height_ratios=[0.8, 3.3, 2.5])
 
         ax_hdr = fig.add_subplot(gs[0])
-        _add_header(ax_hdr, logo_img, 'Informe de Potencias', 'Gráfico de picos relativos y tabla resumen')
+        _add_header(ax_hdr, logo_img, tit_pot, sub_pot)
 
         ax_plot = fig.add_subplot(gs[1])
         if not pivot_pdf.empty:
-            pivot_pdf.plot(kind='bar', ax=ax_plot, width=0.85)
-            ax_plot.set_title('Mejores picos de potencia relativos - últimos 30 días', fontsize=12, fontweight='bold')
-            ax_plot.set_xlabel('Duración')
-            ax_plot.set_ylabel('Potencia relativa (W/kg)')
+            pivot_hist = pd.DataFrame()
+            if not plot_df.empty and 'all_time_wkg' in plot_df.columns:
+                pivot_hist = plot_df.pivot_table(
+                    index='duration_label',
+                    columns='athlete_name',
+                    values='all_time_wkg',
+                    aggfunc='max'
+                ).reindex(orden_duraciones)
+
+            pivot_pdf.plot(kind='bar', ax=ax_plot, width=0.80)
+            ax_plot.set_title('Mejores picos de potencia relativos (W/kg) - últimos 30 días vs Récord Histórico PR', fontsize=12, fontweight='bold')
+            ax_plot.set_xlabel('Duración del Esfuerzo Crítico')
+            ax_plot.set_ylabel('Potencia Relativa (W/kg)')
             ax_plot.grid(axis='y', alpha=0.3)
             ax_plot.tick_params(axis='x', rotation=0)
-            ax_plot.legend(title='Ciclista', bbox_to_anchor=(0.5, -0.15), loc='upper center')
+
+            # Dibujar marcadores de techo récord All-Time PR para cada atleta
+            if not pivot_hist.empty:
+                for j, container in enumerate(ax_plot.containers):
+                    if j < len(pivot_pdf.columns):
+                        ath = pivot_pdf.columns[j]
+                        for i, bar in enumerate(container):
+                            if i < len(pivot_pdf.index):
+                                dur = pivot_pdf.index[i]
+                                h_val = pivot_hist.loc[dur, ath] if ath in pivot_hist.columns else None
+                                if pd.notna(h_val) and h_val > 0:
+                                    x_center = bar.get_x() + bar.get_width() / 2.0
+                                    w_half = bar.get_width() * 0.52
+                                    ax_plot.plot(
+                                        [x_center - w_half, x_center + w_half],
+                                        [h_val, h_val],
+                                        color='#d97706', linewidth=2.4, zorder=5
+                                    )
+                                    b_val = bar.get_height()
+                                    if b_val >= h_val:
+                                        ax_plot.text(x_center, max(b_val, h_val) + 0.16, "🏆PR", ha='center', va='bottom', fontsize=6.5, fontweight='bold', color='#166534')
+                                    else:
+                                        pct = (b_val / h_val) * 100.0
+                                        ax_plot.text(x_center, max(b_val, h_val) + 0.12, f"{pct:.0f}%", ha='center', va='bottom', fontsize=6.0, color='#64748b')
+
+            ax_plot.legend(title='Ciclista (Línea ámbar = Récord PR Histórico)', bbox_to_anchor=(0.5, -0.15), loc='upper center', ncol=min(6, len(pivot_pdf.columns)), fontsize=8.0)
 
         ax_tbl = fig.add_subplot(gs[2])
         ax_tbl.axis('off')
-        ax_tbl.set_title('Tabla Comparativa de Potencias', fontsize=13, pad=12)
+        ax_tbl.set_title('Tabla Comparativa de Potencias (30 días vs Récord Histórico)', fontsize=13, pad=12)
 
         if not tabla_pdf.empty:
             table = ax_tbl.table(
@@ -305,9 +357,38 @@ def generar_informe_potencias_y_carga(
                 cellLoc='center'
             )
             table.auto_set_font_size(False)
-            table.set_fontsize(8.5)
-            table.scale(1, 1.45)
+            table.set_fontsize(7.8)
+            table.scale(1, 1.55)
             _ajustar_anchos_tabla(table, tabla_pdf)
+
+            # Estilo profesional de celdas con semáforo PR
+            for (r_idx, c_idx), cell in table.get_celld().items():
+                cell.set_edgecolor('#cbd5e1')
+                if r_idx == 0:
+                    cell.set_facecolor('#0f172a')
+                    cell.set_text_props(color='#f8fafc', weight='bold')
+                    cell.set_height(0.18)
+                elif c_idx == -1:
+                    cell.set_facecolor('#1e293b')
+                    cell.set_text_props(color='#f8fafc', weight='bold')
+                else:
+                    txt = cell.get_text().get_text()
+                    if '🏆PR' in txt or '100% PR' in txt:
+                        cell.set_facecolor('#dcfce7')  # Verde PR
+                        cell.set_text_props(color='#166534', weight='bold')
+                    elif any(f"{p}% PR" in txt for p in range(95, 100)):
+                        cell.set_facecolor('#ecfdf5')  # Verde menta
+                        cell.set_text_props(color='#047857', weight='bold')
+                    elif any(f"{p}% PR" in txt for p in range(85, 95)):
+                        cell.set_facecolor('#fef3c7')  # Ámbar suave
+                        cell.set_text_props(color='#92400e')
+                    elif any(f"{p}% PR" in txt for p in range(0, 85)):
+                        cell.set_facecolor('#fee2e2')  # Rojo suave
+                        cell.set_text_props(color='#991b1b')
+                    else:
+                        row_bg = '#ffffff' if r_idx % 2 != 0 else '#f8fafc'
+                        cell.set_facecolor(row_bg)
+                        cell.set_text_props(color='#1e293b')
 
         _add_footer(fig, watermark_img=watermark_img, pagina_num=1, total_paginas=2)
         pdf.savefig(fig, bbox_inches='tight')
@@ -323,7 +404,7 @@ def generar_informe_potencias_y_carga(
         gs = fig.add_gridspec(4, 1, height_ratios=[0.7, 1.8, 1.8, 1.8])
 
         ax_hdr = fig.add_subplot(gs[0])
-        _add_header(ax_hdr, logo_img, 'Informe de Carga, Fatiga y Forma', 'Evolución de CTL, ATL y TSB (Zonas de Forma) por ciclista')
+        _add_header(ax_hdr, logo_img, tit_carga, sub_carga)
 
         # Panel CTL
         ax_ctl = fig.add_subplot(gs[1])
@@ -424,7 +505,9 @@ def generar_informe_potencias_y_carga(
 def generar_informe_wellness_hrv(
     wellness_df: pd.DataFrame,
     output_pdf: Optional[Union[str, Path]] = None,
-    logo_path: Optional[Union[str, Path]] = None
+    logo_path: Optional[Union[str, Path]] = None,
+    titulo: Optional[str] = None,
+    grupo_carrera: Optional[Union[int, str]] = None,
 ) -> Path:
     """
     Genera el informe en PDF de 2 páginas con la tabla de resumen y el gráfico
@@ -444,6 +527,9 @@ def generar_informe_wellness_hrv(
     fecha_min = df['date'].min().strftime('%d/%b/%Y')
     fecha_max = df['date'].max().strftime('%d/%b/%Y')
 
+    tit_w = titulo or (f"INFORME DE BIENESTAR (WELLNESS) - CARRERA {grupo_carrera}" if grupo_carrera else "INFORME DE BIENESTAR (WELLNESS) DE ATLETAS")
+    tit_graf = f"{titulo} - Evolución HRV" if titulo else (f"Evolución de HRV (RMSSD) - Carrera {grupo_carrera}" if grupo_carrera else "Evolución de HRV (RMSSD) por Ciclista")
+
     def crear_pagina_resumen(pdf):
         fig, ax = plt.subplots(figsize=(11, 8.5))
         fig.set_layout_engine('constrained', rect=[0, 0.045, 1, 1])
@@ -451,7 +537,7 @@ def generar_informe_wellness_hrv(
         fig.patch.set_facecolor('#f8fafc')
 
         # Título
-        plt.text(0.5, 0.92, 'INFORME DE BIENESTAR (WELLNESS) DE ATLETAS',
+        plt.text(0.5, 0.92, tit_w,
                  transform=ax.transAxes, fontsize=18, fontweight='bold', ha='center', color='#1e293b')
         plt.text(0.5, 0.87, f'Histórico de HRV y Peso ({fecha_min} - {fecha_max}) | Generado: {datetime.now().strftime("%Y-%m-%d")}',
                  transform=ax.transAxes, fontsize=11, style='italic', ha='center', color='#64748b')
@@ -509,7 +595,7 @@ def generar_informe_wellness_hrv(
                         linewidth=2, label=name, color=color)
                 color_idx += 1
 
-        ax.set_title('Evolución de HRV (RMSSD) por Ciclista', fontsize=16, fontweight='bold', pad=20, color='#1e293b')
+        ax.set_title(tit_graf, fontsize=16, fontweight='bold', pad=20, color='#1e293b')
         ax.set_xlabel('Fecha', fontsize=11, fontweight='bold', labelpad=10, color='#475569')
         ax.set_ylabel('HRV RMSSD (ms)', fontsize=11, fontweight='bold', labelpad=10, color='#475569')
         ax.grid(True, linestyle='--', alpha=0.5, color='#cbd5e1')
@@ -1016,17 +1102,46 @@ def generar_informe_etapa_pdf(
         ax_tbl.axis('off')
 
         cols = [
-            "Ciclista", "Torque Med.", "Torque Máx.", "Fuerza Pedal (AEPF)",
-            "MMT 1s (Arrancada)", "MMT 5s", "MMT 30s", "QI (Sprint)", "QII (Escalada)", "QIV (Pelotón)"
+            "Ciclista", "Torque Med.", "Torque Máx.", "Fuerza Pedal",
+            "1s (Trq)", "1s (Pot)", "5s (Trq)", "5s (Pot)", "30s (Trq)", "30s (Pot)",
+            "QI (Sprint)", "QII (Escalada)", "QIV (Pelotón)"
         ]
         tabla_datos = []
         for c in ciclistas_proc:
             s = c['stats']
             mmt = s.get('torque_mmt', {})
+            mmp = s.get('potencia_mmp', {})
             q = s.get('cuadrantes', {}).get('cuadrantes', {})
-            m1 = f"{mmt.get(1, '--')} N·m" if 1 in mmt else "--"
-            m5 = f"{mmt.get(5, '--')} N·m" if 5 in mmt else "--"
-            m30 = f"{mmt.get(30, '--')} N·m" if 30 in mmt else "--"
+            m1_trq = f"{mmt.get(1, '--')} N·m" if 1 in mmt else "--"
+            m5_trq = f"{mmt.get(5, '--')} N·m" if 5 in mmt else "--"
+            m30_trq = f"{mmt.get(30, '--')} N·m" if 30 in mmt else "--"
+
+            # Mapa de comparativa de picos (% PR)
+            comp_map = {}
+            comp_raw = c.get('comparativa_picos', {})
+            if isinstance(comp_raw, dict):
+                for item in comp_raw.get('all_time', []):
+                    comp_map[item.get('segundos')] = item
+            elif isinstance(comp_raw, list):
+                for item in comp_raw:
+                    comp_map[item.get('segundos')] = item
+
+            def _fmt_pot_pr(dur_sec):
+                if dur_sec not in mmp or mmp.get(dur_sec) is None:
+                    return "--"
+                val_m = mmp[dur_sec]
+                w_val = int(round(val_m['watts'])) if isinstance(val_m, dict) else int(round(val_m))
+                item = comp_map.get(dur_sec)
+                if item and item.get('pct_pr') and item['pct_pr'] > 0:
+                    kj_str = f" • {int(round(item['kj_act']))}kJ" if item.get('kj_act') is not None else ""
+                    if item.get('es_pr'):
+                        return f"{w_val} W (🏆PR){kj_str}"
+                    return f"{w_val} W ({item['pct_pr']:.0f}%){kj_str}"
+                return f"{w_val} W"
+
+            m1_pot = _fmt_pot_pr(1)
+            m5_pot = _fmt_pot_pr(5)
+            m30_pot = _fmt_pot_pr(30)
             q1 = f"{q.get('q1_pct', 0)}%"
             q2 = f"{q.get('q2_pct', 0)}%"
             q4 = f"{q.get('q4_pct', 0)}%"
@@ -1036,7 +1151,7 @@ def generar_informe_etapa_pdf(
                 f"{s.get('torque_media_nm', '--')} N·m",
                 f"{s.get('torque_max_nm', '--')} N·m",
                 f"{s.get('aepf_media_n', '--')} N ({s.get('kgf_media', '--')} kgf)",
-                m1, m5, m30, q1, q2, q4
+                m1_trq, m1_pot, m5_trq, m5_pot, m30_trq, m30_pot, q1, q2, q4
             ])
 
         table = ax_tbl.table(
@@ -1047,7 +1162,7 @@ def generar_informe_etapa_pdf(
             bbox=[0.0, 0.05, 1.0, 0.9]
         )
         table.auto_set_font_size(False)
-        table.set_fontsize(8.5)
+        table.set_fontsize(7.5)
         for (r_idx, c_idx), cell in table.get_celld().items():
             cell.set_edgecolor('#e2e8f0')
             if r_idx == 0:

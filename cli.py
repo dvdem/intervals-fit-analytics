@@ -44,6 +44,7 @@ from src import (
     descargar_wellness_atletas,
     resumen_estadisticas_hrv,
     generar_informe_potencias_y_carga,
+    generar_informe_potencias_y_carga_word,
     generar_informe_wellness_hrv,
     generar_informe_etapa_pdf,
     generar_dashboard_perfil_interactivo,
@@ -74,44 +75,85 @@ def cmd_list_athletes(args):
 
 
 def cmd_power_report(args):
-    """Genera el informe completo de potencias y carga en PDF, uno por cada grupo de carrera."""
+    """Genera el informe completo de potencias y carga en PDF, uno por cada grupo de carrera o filtrado por grupo."""
     client = IntervalsClient()
     roster_df = cargar_roster(args.roster)
-    atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=args.solo_carrera)
 
-    # Identificar los grupos de carrera presentes (carrera > 0)
-    grupos_carrera = sorted(set(
-        int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0
-    ))
-    if not grupos_carrera:
-        # Fallback: tratar todos los atletas como un solo grupo sin etiquetar
-        grupos_carrera = [None]
+    grupo_especifico = getattr(args, 'carrera', None)
+    todos = getattr(args, 'todos', False)
+    solo_carrera = not todos
 
-    print(f"\n📊 {len(atletas)} atletas en {len(grupos_carrera)} grupo(s) de carrera: {grupos_carrera}")
+    if grupo_especifico is not None:
+        # Modo: Grupo específico solicitado (ej. --carrera 1 o --carrera 2)
+        atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
+        atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == int(grupo_especifico)]
+        grupos_carrera = [int(grupo_especifico)]
+        if not atletas:
+            print(f"❌ No se encontraron atletas asignados al Grupo Carrera {grupo_especifico} en {args.roster}.")
+            return
+        print(f"\n📊 [Grupo Carrera {grupo_especifico}] {len(atletas)} atletas seleccionados:")
+    else:
+        # Modo: Todos los grupos o corredores en competición
+        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
+        if not atletas:
+            print("❌ No se encontraron atletas para analizar.")
+            return
 
-    # Calcular datos una sola vez para todos los atletas
-    print("⏳ Calculando picos de potencia (30 días vs Histórico)...")
+        if solo_carrera:
+            grupos_carrera = sorted(set(
+                int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0
+            ))
+        else:
+            grupos_carrera = sorted(set(
+                int(a.get('carrera', 0)) for a in atletas
+            ))
+
+        if not grupos_carrera:
+            grupos_carrera = [None]
+
+        print(f"\n📊 {len(atletas)} atletas en {len(grupos_carrera)} grupo(s) de carrera: {grupos_carrera}")
+
+    for a in atletas:
+        c_num = a.get('carrera', 0)
+        c_tag = f" [Carrera {c_num}]" if c_num else ""
+        print(f"   - {a.get('athlete_name')} ({a.get('athlete_id')}){c_tag}")
+
+    # Calcular datos una sola vez para los atletas seleccionados
+    print("\n⏳ Calculando picos de potencia (30 días vs Histórico)...")
     peaks_df_total = calcular_picos_potencia(client, atletas, roster_df, dias_recientes=args.dias)
 
     print("⏳ Calculando evolución de carga diaria, CTL y ATL...")
     nombres_map = dict(zip(roster_df['intervals_id'], roster_df['Name'])) if not roster_df.empty else {}
     metrics_df_total = calcular_metricas_carga(client, atletas, dias_historia=args.dias_carga, dias_plot=args.dias_carga, nombres_map=nombres_map)
 
-    # Mapa de nombre → número de carrera
-    carrera_nombre_map = {}
-    if not roster_df.empty and 'carrera' in roster_df.columns:
-        carrera_nombre_map = dict(zip(roster_df['Name'], roster_df['carrera'].astype(int)))
+    # Títulos personalizados por grupo
+    titulos_por_grupo = {
+        1: getattr(args, 'titulo_1', ''),
+        2: getattr(args, 'titulo_2', ''),
+        3: getattr(args, 'titulo_3', ''),
+    }
 
-    # Generar un PDF por grupo
+    formato = getattr(args, 'formato', 'pdf')
+    generar_pdf = (formato in ['pdf', 'ambos'])
+    generar_docx = (formato in ['docx', 'ambos'])
+
+    # Generar informes por grupo
     rutas_generadas = []
     for grupo in grupos_carrera:
         if grupo is None:
             atletas_grupo = atletas
             label = ""
+            titulo_grupo = getattr(args, 'titulo', None) or "Informe General"
         else:
-            nombres_grupo = {n for n, c in carrera_nombre_map.items() if c == grupo}
-            atletas_grupo = [a for a in atletas if a.get('athlete_name') in nombres_grupo]
+            atletas_grupo = [a for a in atletas if int(a.get('carrera', 0)) == grupo]
             label = f"_carrera_{grupo}"
+            titulo_esp = titulos_por_grupo.get(grupo, '')
+            if titulo_esp:
+                titulo_grupo = titulo_esp
+            elif getattr(args, 'titulo', None):
+                titulo_grupo = f"{args.titulo} - Carrera {grupo}"
+            else:
+                titulo_grupo = f"Grupo Carrera {grupo}"
 
         if not atletas_grupo:
             print(f"⚠️  Grupo Carrera {grupo}: sin atletas, omitiendo.")
@@ -122,35 +164,109 @@ def cmd_power_report(args):
         metrics_g = metrics_df_total[metrics_df_total['athlete_name'].isin(nombres_grupo_set)].copy() if not metrics_df_total.empty else metrics_df_total
         tabla_g, _ = generar_tabla_picos_comparativa(peaks_g)
 
-        if args.output and grupo == grupos_carrera[0]:
-            out_pdf = Path(args.output)
+        # Determinar nombre del PDF de salida
+        if args.output:
+            if len(grupos_carrera) == 1:
+                out_pdf = Path(args.output)
+            else:
+                p = Path(args.output)
+                out_pdf = p.parent / f"{p.stem}{label}{p.suffix}"
         else:
             out_pdf = OUTPUT_DIR / f"intervals_informe{label}.pdf"
 
-        titulo_g = f"Carrera {grupo}" if grupo else "Informe General"
-        print(f"\n📄 [{titulo_g}] {len(atletas_grupo)} atletas → {out_pdf}")
-        ruta_generada = generar_informe_potencias_y_carga(peaks_g, tabla_g, metrics_g, output_pdf=out_pdf)
-        rutas_generadas.append(ruta_generada)
-        print(f"   ✅ Generado: {ruta_generada.resolve()}")
+        # Determinar nombre del Word de salida
+        if getattr(args, 'output_docx', None):
+            if len(grupos_carrera) == 1:
+                out_docx = Path(args.output_docx)
+            else:
+                p = Path(args.output_docx)
+                out_docx = p.parent / f"{p.stem}{label}{p.suffix}"
+        else:
+            out_docx = out_pdf.with_suffix('.docx')
+
+        rutas_grupo = {}
+        if generar_pdf:
+            print(f"\n📄 [{titulo_grupo}] {len(atletas_grupo)} atletas (PDF) → {out_pdf}")
+            ruta_pdf = generar_informe_potencias_y_carga(
+                peaks_g,
+                tabla_g,
+                metrics_g,
+                output_pdf=out_pdf,
+                titulo=titulo_grupo,
+                grupo_carrera=grupo
+            )
+            rutas_grupo['pdf'] = ruta_pdf
+            print(f"   ✅ PDF Generado: {ruta_pdf.resolve()}")
+
+        if generar_docx:
+            print(f"\n📝 [{titulo_grupo}] {len(atletas_grupo)} atletas (Word) → {out_docx}")
+            ruta_docx = generar_informe_potencias_y_carga_word(
+                peaks_g,
+                tabla_g,
+                metrics_g,
+                output_docx=out_docx,
+                titulo=titulo_grupo,
+                grupo_carrera=grupo
+            )
+            rutas_grupo['docx'] = ruta_docx
+            print(f"   ✅ Word Generado: {ruta_docx.resolve()}")
+
+        rutas_generadas.append((grupo, titulo_grupo, rutas_grupo))
 
     if rutas_generadas:
-        print(f"\n✅ {len(rutas_generadas)} informe(s) generado(s) correctamente.")
+        print("\n" + "=" * 55)
+        print("🏆 Informes de potencia generados correctamente:")
+        for _, tit, rg in rutas_generadas:
+            print(f"   📊 {tit}:")
+            if 'pdf' in rg:
+                print(f"      📄 PDF:  {rg['pdf'].resolve()}")
+            if 'docx' in rg:
+                print(f"      📝 Word: {rg['docx'].resolve()}")
+        print("=" * 55 + "\n")
 
 
 def cmd_hrv_report(args):
-    """Genera el informe de evolución de HRV (RMSSD) y bienestar en PDF, uno por cada grupo de carrera."""
+    """Genera el informe de evolución de HRV (RMSSD) y bienestar en PDF, uno por cada grupo de carrera o filtrado por grupo."""
     client = IntervalsClient()
     roster_df = cargar_roster(args.roster)
-    atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=args.solo_carrera)
 
-    # Identificar grupos de carrera presentes
-    grupos_carrera = sorted(set(
-        int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0
-    ))
-    if not grupos_carrera:
-        grupos_carrera = [None]
+    grupo_especifico = getattr(args, 'carrera', None)
+    todos = getattr(args, 'todos', False)
+    solo_carrera = not todos
 
-    print(f"\n🩺 Descargando datos de bienestar para {len(atletas)} atletas en {len(grupos_carrera)} grupo(s)...")
+    if grupo_especifico is not None:
+        atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
+        atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == int(grupo_especifico)]
+        grupos_carrera = [int(grupo_especifico)]
+        if not atletas:
+            print(f"❌ No se encontraron atletas asignados al Grupo Carrera {grupo_especifico} en {args.roster}.")
+            return
+        print(f"\n🩺 [Grupo Carrera {grupo_especifico}] {len(atletas)} atletas seleccionados:")
+    else:
+        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
+        if not atletas:
+            print("❌ No se encontraron atletas para analizar.")
+            return
+
+        if solo_carrera:
+            grupos_carrera = sorted(set(
+                int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0
+            ))
+        else:
+            grupos_carrera = sorted(set(
+                int(a.get('carrera', 0)) for a in atletas
+            ))
+
+        if not grupos_carrera:
+            grupos_carrera = [None]
+
+        print(f"\n🩺 Descargando datos de bienestar para {len(atletas)} atletas en {len(grupos_carrera)} grupo(s)...")
+
+    for a in atletas:
+        c_num = a.get('carrera', 0)
+        c_tag = f" [Carrera {c_num}]" if c_num else ""
+        print(f"   - {a.get('athlete_name')} ({a.get('athlete_id')}){c_tag}")
+
     nombres_map = dict(zip(roster_df['intervals_id'], roster_df['Name'])) if not roster_df.empty else {}
     wellness_df_total = descargar_wellness_atletas(client, atletas, nombres_map=nombres_map)
 
@@ -159,41 +275,63 @@ def cmd_hrv_report(args):
         return
 
     stats_df = resumen_estadisticas_hrv(wellness_df_total)
-    print("\n📋 Resumen de Estadísticas HRV (todos los grupos):")
+    print("\n📋 Resumen de Estadísticas HRV:")
     print(tabulate(stats_df, headers="keys", tablefmt="fancy_grid", showindex=False))
 
-    # Mapa nombre → carrera
-    carrera_nombre_map = {}
-    if not roster_df.empty and 'carrera' in roster_df.columns:
-        carrera_nombre_map = dict(zip(roster_df['Name'], roster_df['carrera'].astype(int)))
+    titulos_por_grupo = {
+        1: getattr(args, 'titulo_1', ''),
+        2: getattr(args, 'titulo_2', ''),
+        3: getattr(args, 'titulo_3', ''),
+    }
 
     rutas_generadas = []
     for grupo in grupos_carrera:
         if grupo is None:
             wellness_g = wellness_df_total
             label = ""
+            titulo_grupo = getattr(args, 'titulo', None) or "Informe General"
         else:
-            nombres_grupo = {n for n, c in carrera_nombre_map.items() if c == grupo}
+            atletas_grupo = [a for a in atletas if int(a.get('carrera', 0)) == grupo]
+            nombres_grupo = {a.get('athlete_name') for a in atletas_grupo}
             wellness_g = wellness_df_total[wellness_df_total['athlete_name'].isin(nombres_grupo)].copy()
             label = f"_carrera_{grupo}"
+            titulo_esp = titulos_por_grupo.get(grupo, '')
+            if titulo_esp:
+                titulo_grupo = titulo_esp
+            elif getattr(args, 'titulo', None):
+                titulo_grupo = f"{args.titulo} - Carrera {grupo}"
+            else:
+                titulo_grupo = f"Grupo Carrera {grupo}"
 
         if wellness_g.empty:
             print(f"⚠️  Grupo Carrera {grupo}: sin datos de wellness, omitiendo.")
             continue
 
-        if args.output and grupo == grupos_carrera[0]:
-            out_pdf = Path(args.output)
+        if args.output:
+            if len(grupos_carrera) == 1:
+                out_pdf = Path(args.output)
+            else:
+                p = Path(args.output)
+                out_pdf = p.parent / f"{p.stem}{label}{p.suffix}"
         else:
             out_pdf = OUTPUT_DIR / f"wellness_evolucion{label}.pdf"
 
-        titulo_g = f"Carrera {grupo}" if grupo else "Informe General"
-        print(f"\n📄 [{titulo_g}] → {out_pdf}")
-        ruta_generada = generar_informe_wellness_hrv(wellness_g, output_pdf=out_pdf)
+        print(f"\n📄 [{titulo_grupo}] → {out_pdf}")
+        ruta_generada = generar_informe_wellness_hrv(
+            wellness_g,
+            output_pdf=out_pdf,
+            titulo=titulo_grupo,
+            grupo_carrera=grupo
+        )
         rutas_generadas.append(ruta_generada)
         print(f"   ✅ Generado: {ruta_generada.resolve()}")
 
     if rutas_generadas:
-        print(f"\n✅ {len(rutas_generadas)} informe(s) de HRV generado(s) correctamente.")
+        print("\n" + "=" * 55)
+        print(f"🏆 {len(rutas_generadas)} informe(s) de HRV generado(s) correctamente:")
+        for r in rutas_generadas:
+            print(f"   📄 {r.resolve()}")
+        print("=" * 55 + "\n")
 
 
 def cmd_fit_cda(args):
@@ -355,7 +493,9 @@ def cmd_interactive_profile(args):
     print(f"\n🚴 Procesando {len(fits_unicos)} ciclistas / fuentes de posicionamiento...")
 
     solo_carrera = not getattr(args, 'todos', False)
-    generar_pdf = not getattr(args, 'no_pdf', False)
+    formato = getattr(args, 'formato', 'pdf')
+    generar_pdf = not getattr(args, 'no_pdf', False) and (formato in ['pdf', 'ambos'])
+    generar_docx = (formato in ['docx', 'ambos'])
     fits_limpiar = fits_temporales if not getattr(args, 'mantener_fits', False) else None
 
     # Identificar grupos de carrera del roster (carrera > 0 → rider compite)
@@ -370,6 +510,7 @@ def cmd_interactive_profile(args):
     if forzar_global:
         out_html = Path(args.output) if args.output else None
         out_pdf = Path(args.output_pdf) if getattr(args, 'output_pdf', None) else None
+        out_docx = Path(args.output_docx) if getattr(args, 'output_docx', None) else None
         ruta_generada = generar_dashboard_perfil_interactivo(
             fits_unicos,
             roster_df=roster_df,
@@ -379,21 +520,27 @@ def cmd_interactive_profile(args):
             output_html=out_html,
             output_pdf=out_pdf,
             generar_pdf=generar_pdf,
+            output_docx=out_docx,
+            generar_docx=generar_docx,
+            formato_informe=formato,
             fits_temporales_limpiar=fits_limpiar
         )
         pdf_estimado = out_pdf or ruta_generada.with_suffix('.pdf')
+        docx_estimado = out_docx or ruta_generada.with_suffix('.docx')
         print("\n" + "=" * 55)
         print("🏆 ¡PERFIL E INFORME DE ETAPA GENERADOS CON ÉXITO!")
         print("=" * 55)
         print(f"📄 Archivo HTML: {ruta_generada.resolve()}")
         if generar_pdf and pdf_estimado.exists():
             print(f"📄 Archivo PDF:  {pdf_estimado.resolve()}")
-        print("💡 Ábrelo en cualquier navegador o visor PDF para ver el análisis")
+        if generar_docx and docx_estimado.exists():
+            print(f"📝 Archivo Word: {docx_estimado.resolve()}")
+        print("💡 Ábrelo en cualquier navegador o procesador para ver el análisis")
         print("   completo de la etapa, comparativas y fisiología.")
         print("=" * 55 + "\n")
         return
 
-    # Generar un perfil HTML (y PDF) independiente por cada grupo de carrera
+    # Generar un perfil HTML (y PDF/Word) independiente por cada grupo de carrera
     print(f"\n🏁 Detectados {len(grupos_carrera)} grupo(s) de carrera: {grupos_carrera}")
     rutas_generadas = []
     for idx, grupo in enumerate(grupos_carrera):
@@ -411,6 +558,11 @@ def cmd_interactive_profile(args):
         if getattr(args, 'output_pdf', None):
             p = Path(args.output_pdf)
             out_pdf_grupo = p.parent / f"{p.stem}_carrera_{grupo}{p.suffix}"
+
+        out_docx_grupo = None
+        if getattr(args, 'output_docx', None):
+            p = Path(args.output_docx)
+            out_docx_grupo = p.parent / f"{p.stem}_carrera_{grupo}{p.suffix}"
 
         # Título: prioridad → 1) --titulo-N específico del grupo, 2) --titulo base, 3) genérico
         titulos_por_grupo = {
@@ -440,6 +592,9 @@ def cmd_interactive_profile(args):
                 output_html=out_html_grupo,
                 output_pdf=out_pdf_grupo,
                 generar_pdf=generar_pdf,
+                output_docx=out_docx_grupo,
+                generar_docx=generar_docx,
+                formato_informe=formato,
                 fits_temporales_limpiar=fits_limpiar_grupo
             )
             rutas_generadas.append((grupo, ruta))
@@ -452,7 +607,13 @@ def cmd_interactive_profile(args):
         print("=" * 55)
         for grupo, ruta in rutas_generadas:
             print(f"   📄 Carrera {grupo}: {ruta.resolve()}")
-        print("💡 Ábrelos en cualquier navegador para ver el análisis completo.")
+            pdf_g = ruta.with_suffix('.pdf')
+            docx_g = ruta.with_suffix('.docx')
+            if generar_pdf and pdf_g.exists():
+                print(f"      📄 PDF:  {pdf_g.resolve()}")
+            if generar_docx and docx_g.exists():
+                print(f"      📝 Word: {docx_g.resolve()}")
+        print("💡 Ábrelos en cualquier navegador o visor para ver el análisis completo.")
         print("=" * 55 + "\n")
 
 
@@ -472,16 +633,37 @@ def main():
     # Comando: power-report
     p_power = subparsers.add_parser("power-report", help="Genera el informe de potencias y carga en PDF")
     p_power.add_argument("--roster", default=str(DEFAULT_ROSTER_PATH), help="Ruta al archivo CSV de plantilla")
-    p_power.add_argument("--solo-carrera", action="store_true", help="Filtrar solo atletas con carrera=1")
+    p_power.add_argument("--carrera", "--grupo", dest="carrera", type=int, default=None,
+                         help="Filtrar por grupo de carrera específico (ej. 1 o 2). Si no se indica, procesa cada grupo por separado.")
+    p_power.add_argument("--todos", action="store_true", default=False,
+                         help="Incluir a todos los atletas del equipo (incluso los no asignados a carrera)")
+    p_power.add_argument("--solo-carrera", action="store_true", default=True,
+                         help="Filtrar solo atletas en carrera (carrera > 0) [activo por defecto]")
     p_power.add_argument("--dias", type=int, default=30, help="Ventana de días para picos de potencia recientes")
     p_power.add_argument("--dias-carga", type=int, default=60, help="Ventana de días para evolución de CTL/ATL")
+    p_power.add_argument("--titulo", help="Título base para el informe (ej. 'Vuelta a Burgos')")
+    p_power.add_argument("--titulo-1", dest="titulo_1", default="", help="Título personalizado para Carrera 1")
+    p_power.add_argument("--titulo-2", dest="titulo_2", default="", help="Título personalizado para Carrera 2")
+    p_power.add_argument("--titulo-3", dest="titulo_3", default="", help="Título personalizado para Carrera 3")
     p_power.add_argument("--output", help="Ruta del archivo PDF de salida")
+    p_power.add_argument("--output-docx", help="Ruta del archivo Word (.docx) de salida")
+    p_power.add_argument("--formato", choices=["pdf", "docx", "ambos"], default="pdf",
+                         help="Formato del informe: 'pdf', 'docx' (Word) o 'ambos' (por defecto: pdf)")
     p_power.set_defaults(func=cmd_power_report)
 
     # Comando: hrv-report
     p_hrv = subparsers.add_parser("hrv-report", help="Genera el informe de HRV y bienestar en PDF")
     p_hrv.add_argument("--roster", default=str(DEFAULT_ROSTER_PATH), help="Ruta al archivo CSV de plantilla")
-    p_hrv.add_argument("--solo-carrera", action="store_true", help="Filtrar solo atletas con carrera=1")
+    p_hrv.add_argument("--carrera", "--grupo", dest="carrera", type=int, default=None,
+                       help="Filtrar por grupo de carrera específico (ej. 1 o 2). Si no se indica, procesa cada grupo por separado.")
+    p_hrv.add_argument("--todos", action="store_true", default=False,
+                       help="Incluir a todos los atletas del equipo (incluso los no asignados a carrera)")
+    p_hrv.add_argument("--solo-carrera", action="store_true", default=True,
+                       help="Filtrar solo atletas en carrera (carrera > 0) [activo por defecto]")
+    p_hrv.add_argument("--titulo", help="Título base para el informe")
+    p_hrv.add_argument("--titulo-1", dest="titulo_1", default="", help="Título personalizado para Carrera 1")
+    p_hrv.add_argument("--titulo-2", dest="titulo_2", default="", help="Título personalizado para Carrera 2")
+    p_hrv.add_argument("--titulo-3", dest="titulo_3", default="", help="Título personalizado para Carrera 3")
     p_hrv.add_argument("--output", help="Ruta del archivo PDF de salida")
     p_hrv.set_defaults(func=cmd_hrv_report)
 
@@ -528,6 +710,9 @@ def main():
     p_prof.add_argument("--titulo-3", dest="titulo_3", default="", help="Título personalizado para el grupo Carrera 3")
     p_prof.add_argument("--output", help="Ruta del archivo HTML de salida")
     p_prof.add_argument("--output-pdf", help="Ruta del archivo PDF de salida")
+    p_prof.add_argument("--output-docx", help="Ruta del archivo Word (.docx) de salida")
+    p_prof.add_argument("--formato", choices=["pdf", "docx", "ambos"], default="pdf",
+                        help="Formato del informe ejecutivo: 'pdf', 'docx' (Word) o 'ambos' (por defecto: pdf)")
     p_prof.add_argument("--no-pdf", action="store_true", help="Omitir la generación del informe PDF")
     p_prof.set_defaults(func=cmd_interactive_profile)
 

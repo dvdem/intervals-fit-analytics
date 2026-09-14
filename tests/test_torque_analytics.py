@@ -12,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
 from src.torque_analytics import (
     calcular_torque_seguro,
     calcular_picos_torque,
+    calcular_picos_potencia_serie,
     calcular_analisis_cuadrantes,
     calcular_zonas_torque,
     calcular_perfil_fuerza_velocidad,
@@ -62,6 +63,15 @@ class TestTorqueAnalytics(unittest.TestCase):
         self.assertEqual(picos[5], 100.0)
         self.assertLess(picos[10], 100.0)
 
+    def test_picos_potencia_mmp(self):
+        # Serie sintética de potencia con pico de 5s a 900 W
+        pwr_arr = np.array([200.0] * 10 + [900.0] * 5 + [300.0] * 10)
+        picos_pwr = calcular_picos_potencia_serie(pwr_arr, duraciones={1: "1s", 5: "5s", 10: "10s"})
+
+        self.assertEqual(picos_pwr[1], 900.0)
+        self.assertEqual(picos_pwr[5], 900.0)
+        self.assertLess(picos_pwr[10], 900.0)
+
     def test_analisis_cuadrantes(self):
         # 100s en Q1 (alta cad 95, alto trq 60)
         # 100s en Q2 (baja cad 70, alto trq 60)
@@ -110,6 +120,9 @@ class TestTorqueAnalytics(unittest.TestCase):
         self.assertGreater(stats['trq_max_nm'], 50.0)
         self.assertIn(1, stats['mmt'])
         self.assertIn(5, stats['mmt'])
+        self.assertIn('mmp', stats)
+        self.assertIn(1, stats['mmp'])
+        self.assertIn(5, stats['mmp'])
         self.assertIn('cuadrantes', stats)
         self.assertIn('zonas', stats)
 
@@ -123,7 +136,37 @@ class TestTorqueAnalytics(unittest.TestCase):
         self.assertTrue(stats['disponible'])
         self.assertEqual(stats['trq_media_nm'], 0.0)
         self.assertIn('cuadrantes', stats)
-        self.assertIn('zonas', stats)
+    def test_crank_length_desde_burgos_csv_y_mm_a_metros(self):
+        from config import obtener_crank_length_ciclista, normalizar_crank_length_m, DEFAULT_CRANK_LENGTH
+
+        # Conversión de mm a metros
+        self.assertAlmostEqual(normalizar_crank_length_m(172.5), 0.1725, places=4)
+        self.assertAlmostEqual(normalizar_crank_length_m(165), 0.165, places=4)
+        self.assertAlmostEqual(normalizar_crank_length_m(175.0), 0.175, places=4)
+        self.assertAlmostEqual(normalizar_crank_length_m(0.170), 0.170, places=4)
+        self.assertEqual(normalizar_crank_length_m(None), DEFAULT_CRANK_LENGTH)
+        self.assertEqual(normalizar_crank_length_m("invalido"), DEFAULT_CRANK_LENGTH)
+
+        # Resolución desde burgos.csv
+        self.assertAlmostEqual(obtener_crank_length_ciclista('Carlos Garcia'), 0.165, places=4)
+        self.assertAlmostEqual(obtener_crank_length_ciclista('Alex Mayer'), 0.165, places=4)
+        self.assertAlmostEqual(obtener_crank_length_ciclista('Ander Okamika'), 0.175, places=4)
+        self.assertAlmostEqual(obtener_crank_length_ciclista('Mario Aparicio'), 0.1725, places=4)
+        self.assertAlmostEqual(obtener_crank_length_ciclista('i547157'), 0.170, places=4)  # Jose Manuel Diaz
+        self.assertEqual(obtener_crank_length_ciclista('No Existe Ciclista'), DEFAULT_CRANK_LENGTH)
+
+        # Equivalencia en calcular_torque_seguro pasando en mm vs metros
+        pot = np.array([450.0])
+        cad = np.array([90.0])
+        trq_m, aepf_m = calcular_torque_seguro(pot, cad, crank_length_m=0.1725)
+        trq_mm, aepf_mm = calcular_torque_seguro(pot, cad, crank_length_m=172.5)
+        self.assertAlmostEqual(aepf_m[0], aepf_mm[0], places=2)
+
+        # En calcular_metricas_torque_completas con identificador_ciclista
+        df_dummy = pd.DataFrame({'potencia': [300.0] * 50, 'cadencia': [90.0] * 50})
+        stats_mayer = calcular_metricas_torque_completas(df_dummy, ftp=350.0, identificador_ciclista='Alex Mayer')
+        self.assertEqual(stats_mayer['crank_length_mm'], 165.0)
+        self.assertEqual(stats_mayer['crank_length_m'], 0.165)
 
 
 if __name__ == '__main__':

@@ -21,20 +21,22 @@ try:
     from config import (
         DEFAULT_CRANK_LENGTH,
         DEFAULT_QUADRANT_CADENCE_THRESH,
-        DEFAULT_TORQUE_PEAK_DURATIONS
+        DEFAULT_TORQUE_PEAK_DURATIONS,
+        obtener_crank_length_ciclista
     )
 except (ImportError, ValueError):
     from ..config import (
         DEFAULT_CRANK_LENGTH,
         DEFAULT_QUADRANT_CADENCE_THRESH,
-        DEFAULT_TORQUE_PEAK_DURATIONS
+        DEFAULT_TORQUE_PEAK_DURATIONS,
+        obtener_crank_length_ciclista
     )
 
 
 def calcular_torque_seguro(
     potencia: Union[np.ndarray, pd.Series, List[float]],
     cadencia: Union[np.ndarray, pd.Series, List[float]],
-    crank_length_m: float = DEFAULT_CRANK_LENGTH,
+    crank_length_m: Optional[float] = None,
     cad_min_rpm: float = 15.0,
     torque_max_clip: float = 250.0
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -43,7 +45,13 @@ def calcular_torque_seguro(
     Aplica filtros de seguridad:
     - Para cadencia < cad_min_rpm (rueda libre o arranque sin enganche), asigna 0.0 N·m.
     - Limita picos numéricos anómalos a torque_max_clip (250 N·m por defecto).
+    - Longitud de biela: si viene en mm (ej. 170.0), se pasa a metros; si es None o <= 0, usa DEFAULT_CRANK_LENGTH.
     """
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        crank_length_m = DEFAULT_CRANK_LENGTH
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     p = np.asarray(potencia, dtype=float)
     c = np.asarray(cadencia, dtype=float)
 
@@ -88,11 +96,127 @@ def calcular_picos_torque(
     return picos
 
 
+def calcular_picos_potencia_serie(
+    potencia_series: Union[pd.Series, np.ndarray],
+    duraciones: Optional[Union[Dict[int, str], List[int]]] = None
+) -> Dict[int, float]:
+    """
+    Calcula los picos de Mean Maximal Power (MMP) para duraciones estándar (1s, 5s, 10s, 30s, 1m, 5m, etc.).
+    Devuelve un diccionario {segundos: max_potencia_w}.
+    """
+    if duraciones is None:
+        duraciones = DEFAULT_TORQUE_PEAK_DURATIONS
+
+    segs_list = sorted(duraciones.keys()) if hasattr(duraciones, 'keys') else sorted(duraciones)
+
+    s = pd.Series(potencia_series).fillna(0.0)
+    picos = {}
+    n = len(s)
+
+    for seg in segs_list:
+        if n >= seg and seg > 0:
+            val = float(s.rolling(window=seg, min_periods=seg).mean().max())
+            picos[seg] = round(val, 1) if not np.isnan(val) else 0.0
+        elif n > 0 and seg > 0:
+            val = float(s.mean())
+            picos[seg] = round(val, 1) if not np.isnan(val) else 0.0
+        else:
+            picos[seg] = 0.0
+
+    return picos
+
+
+def calcular_picos_potencia_con_contexto(
+    potencia_series: Union[pd.Series, np.ndarray],
+    duraciones: Optional[Union[Dict[int, str], List[int]]] = None,
+    peso_kg: float = 70.0
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Calcula los picos de Mean Maximal Power (MMP) y extrae para cada duración:
+    - watts: potencia media máxima en vatios (float)
+    - wkg: potencia relativa en W/kg (float)
+    - idx_inicio: índice (segundo de movimiento) de inicio del intervalo pico
+    - idx_fin: índice de finalización del intervalo pico
+    - tiempo_inicio_str: hora/minuto/segundo (hh:mm:ss) del inicio del pico
+    - pct_etapa: porcentaje del tiempo de carrera transcurrido antes del pico
+    - kj_previos: kilojulios consumidos desde el inicio de la actividad hasta el pico
+    - kjkg_previos: kilojulios por kilo consumidos antes del pico
+    """
+    if duraciones is None:
+        duraciones = DEFAULT_TORQUE_PEAK_DURATIONS
+
+    segs_list = sorted(duraciones.keys()) if hasattr(duraciones, 'keys') else sorted(duraciones)
+
+    s = pd.Series(potencia_series).fillna(0.0).astype(float)
+    n = len(s)
+    peso = max(30.0, float(peso_kg) if peso_kg and peso_kg > 0 else 70.0)
+    kj_acum = (s * 1.0).cumsum().values / 1000.0
+
+    picos_contexto = {}
+
+    for seg in segs_list:
+        if n >= seg and seg > 0:
+            roll = s.rolling(window=seg, min_periods=seg).mean()
+            idx_fin = int(roll.idxmax())
+            val = float(roll.iloc[idx_fin])
+            if np.isnan(val):
+                val = 0.0
+
+            idx_inicio = max(0, idx_fin - seg + 1)
+            kj_prev = float(kj_acum[idx_inicio - 1]) if idx_inicio > 0 else 0.0
+            kjkg_prev = round(kj_prev / peso, 1)
+
+            horas = idx_inicio // 3600
+            mins = (idx_inicio % 3600) // 60
+            secs = idx_inicio % 60
+            tiempo_str = f"{horas:02d}:{mins:02d}:{secs:02d}"
+            pct_etapa = round((idx_inicio / max(1, n)) * 100.0, 1)
+
+            picos_contexto[seg] = {
+                'watts': round(val, 1),
+                'wkg': round(val / peso, 2),
+                'idx_inicio': idx_inicio,
+                'idx_fin': idx_fin,
+                'tiempo_inicio_str': tiempo_str,
+                'pct_etapa': pct_etapa,
+                'kj_previos': round(kj_prev, 1),
+                'kjkg_previos': kjkg_prev
+            }
+        elif n > 0 and seg > 0:
+            val = float(s.mean())
+            if np.isnan(val):
+                val = 0.0
+            picos_contexto[seg] = {
+                'watts': round(val, 1),
+                'wkg': round(val / peso, 2),
+                'idx_inicio': 0,
+                'idx_fin': n - 1,
+                'tiempo_inicio_str': "00:00:00",
+                'pct_etapa': 0.0,
+                'kj_previos': 0.0,
+                'kjkg_previos': 0.0
+            }
+        else:
+            picos_contexto[seg] = {
+                'watts': 0.0,
+                'wkg': 0.0,
+                'idx_inicio': 0,
+                'idx_fin': 0,
+                'tiempo_inicio_str': "00:00:00",
+                'pct_etapa': 0.0,
+                'kj_previos': 0.0,
+                'kjkg_previos': 0.0
+            }
+
+    return picos_contexto
+
+
+
 def calcular_analisis_cuadrantes(
     df: pd.DataFrame,
     ftp: float = 380.0,
     cad_thresh: float = DEFAULT_QUADRANT_CADENCE_THRESH,
-    crank_length_m: float = DEFAULT_CRANK_LENGTH,
+    crank_length_m: Optional[float] = None,
     max_scatter_points: int = 1500
 ) -> Dict[str, Any]:
     """
@@ -107,6 +231,11 @@ def calcular_analisis_cuadrantes(
     - QIII(Baja Cad, Bajo Trq): Recuperación, pedaleo suave, bajadas.
     - QIV (Alta Cad, Bajo Trq): Rodar protegido en pelotón a alta velocidad.
     """
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        crank_length_m = DEFAULT_CRANK_LENGTH
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     if df.empty or 'cadencia' not in df.columns or 'potencia' not in df.columns:
         return {
             'disponible': False,
@@ -121,7 +250,7 @@ def calcular_analisis_cuadrantes(
     cad_th = float(cad_thresh) if cad_thresh and cad_thresh > 0 else 85.0
     omega_th = cad_th * (2.0 * np.pi / 60.0)
     trq_th = round(float(ftp_val / omega_th), 2)
-    aepf_th = round(float(trq_th / crank_length_m), 1)
+    aepf_th = round(float(trq_th / max(0.1, crank_length_m)), 1)
 
     c = df['cadencia'].fillna(0.0).values
     p = df['potencia'].fillna(0.0).values
@@ -237,7 +366,7 @@ def calcular_zonas_torque(
     df: pd.DataFrame,
     ftp: float = 380.0,
     cad_thresh: float = DEFAULT_QUADRANT_CADENCE_THRESH,
-    crank_length_m: float = DEFAULT_CRANK_LENGTH
+    crank_length_m: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Calcula la distribución del tiempo en 6 zonas de torque biomecánico basadas en el Torque de FTP:
@@ -248,6 +377,11 @@ def calcular_zonas_torque(
     - Z5 (115-145% tau_FTP): Supra-Umbral / Fuerza Alta
     - Z6 (> 145% tau_FTP): Neuromuscular Máximo
     """
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        crank_length_m = DEFAULT_CRANK_LENGTH
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     if df.empty or 'cadencia' not in df.columns or 'potencia' not in df.columns:
         return {}
 
@@ -304,7 +438,7 @@ def calcular_zonas_torque(
 
 def calcular_perfil_fuerza_velocidad(
     df: pd.DataFrame,
-    crank_length_m: float = DEFAULT_CRANK_LENGTH,
+    crank_length_m: Optional[float] = None,
     cad_bin_size: float = 5.0,
     min_pts_por_bin: int = 5
 ) -> Dict[str, Any]:
@@ -317,6 +451,11 @@ def calcular_perfil_fuerza_velocidad(
     - cad_opt: Cadencia óptima de sprint para máxima potencia (cad0 / 2).
     - Pmax: Potencia pico teórica máxima (W).
     """
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        crank_length_m = DEFAULT_CRANK_LENGTH
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     if df.empty or 'cadencia' not in df.columns or 'potencia' not in df.columns:
         return {'disponible': False}
 
@@ -392,13 +531,18 @@ def calcular_perfil_fuerza_velocidad(
 def calcular_degradacion_fatiga_torque(
     df: pd.DataFrame,
     umbral_kj: float = 2000.0,
-    crank_length_m: float = DEFAULT_CRANK_LENGTH
+    crank_length_m: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Compara el rendimiento de torque entre la fase inicial (fresca) y la fase fatigada
     tras haber acumulado un umbral de trabajo mecánico (por defecto 2000 kJ).
     Permite evaluar la retención neuromuscular de arrancada y pedaleo en el final de etapa.
     """
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        crank_length_m = DEFAULT_CRANK_LENGTH
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     if df.empty or 'potencia' not in df.columns:
         return {'disponible': False}
 
@@ -481,9 +625,10 @@ def calcular_degradacion_fatiga_torque(
 def calcular_metricas_torque_completas(
     df: pd.DataFrame,
     ftp: float = 380.0,
-    crank_length_m: float = DEFAULT_CRANK_LENGTH,
+    crank_length_m: Optional[float] = None,
     cad_thresh: float = DEFAULT_QUADRANT_CADENCE_THRESH,
-    duraciones_mmt: Optional[Dict[int, str]] = None
+    duraciones_mmt: Optional[Dict[int, str]] = None,
+    identificador_ciclista: Optional[Union[str, int]] = None
 ) -> Dict[str, Any]:
     """
     Función de integración principal: calcula todas las estadísticas de torque, AEPF,
@@ -492,12 +637,20 @@ def calcular_metricas_torque_completas(
     if df.empty or 'cadencia' not in df.columns or 'potencia' not in df.columns:
         return {'disponible': False}
 
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        if identificador_ciclista is not None:
+            crank_length_m = obtener_crank_length_ciclista(identificador_ciclista)
+        else:
+            crank_length_m = DEFAULT_CRANK_LENGTH
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     c = df['cadencia'].fillna(0.0).values
     p = df['potencia'].fillna(0.0).values
 
     if 'torque' in df.columns and 'aepf' in df.columns:
         trq = df['torque'].fillna(0.0).values
-        aepf = df['aepf'].fillna(0.0).values
+        aepf = trq / max(0.1, crank_length_m)
     else:
         trq, aepf = calcular_torque_seguro(p, c, crank_length_m=crank_length_m)
 
@@ -523,8 +676,9 @@ def calcular_metricas_torque_completas(
     kgf_media = round(float(aepf_media / 9.80665), 1)
     kgf_max = round(float(aepf_max / 9.80665), 1)
 
-    # Curva MMT (Mean Maximal Torque)
+    # Curva MMT (Mean Maximal Torque) y MMP (Mean Maximal Power)
     mmt = calcular_picos_torque(trq, duraciones=duraciones_mmt)
+    mmp = calcular_picos_potencia_serie(p, duraciones=duraciones_mmt)
 
     # Análisis de Cuadrantes
     cuadrantes = calcular_analisis_cuadrantes(
@@ -577,7 +731,9 @@ def calcular_metricas_torque_completas(
         'kgf_media': kgf_media,
         'kgf_max': kgf_max,
         'crank_length_mm': round(crank_length_m * 1000.0, 1),
+        'crank_length_m': round(crank_length_m, 4),
         'mmt': mmt,
+        'mmp': mmp,
         'cuadrantes': cuadrantes,
         'zonas': zonas,
         'perfil_fv': perfil_fv,

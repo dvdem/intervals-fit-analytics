@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Genera el perfil interactivo HTML de la etapa para la fecha especificada o la fecha actual.
 .DESCRIPTION
@@ -12,13 +12,18 @@
 .PARAMETER MantenerFits
     Conservar los archivos .fit descargados en disco.
 .PARAMETER NoAbrir
-    No abrir automaticamente el archivo HTML en el navegador al finalizar.
+.PARAMETER Formato
+    Formato del informe ejecutivo: 'pdf', 'docx' (Word) o 'ambos' (por defecto: 'pdf').
 .EXAMPLE
     .\generar_perfil.ps1
 .EXAMPLE
     .\generar_perfil.ps1 -Fecha 2026-08-26
 .EXAMPLE
     .\generar_perfil.ps1 -Fecha 2026-08-26 -Titulo "Etapa 1 - Vuelta"
+.EXAMPLE
+    .\generar_perfil.ps1 -Fecha 2026-08-26 -Formato docx
+.EXAMPLE
+    .\generar_perfil.ps1 -Fecha 2026-08-26 -Formato ambos
 #>
 param (
     [string]$Fecha = (Get-Date -Format "yyyy-MM-dd"),
@@ -26,6 +31,8 @@ param (
     [string]$Titulo1 = "",
     [string]$Titulo2 = "",
     [string]$Titulo3 = "",
+    [ValidateSet('pdf', 'docx', 'ambos', 'ninguno')]
+    [string]$Formato = 'pdf',
     [switch]$Todos,
     [switch]$MantenerFits,
     [switch]$NoAbrir
@@ -65,6 +72,9 @@ if ($Todos) {
 if ($MantenerFits) {
     $argsList += "--mantener-fits"
 }
+if ($Formato) {
+    $argsList += @("--formato", $Formato)
+}
 
 # Ejecutar el comando
 & $pythonExe @argsList
@@ -79,7 +89,11 @@ if ($LASTEXITCODE -eq 0 -and (-not $NoAbrir)) {
         foreach ($html in $htmlsGrupo) {
             $pdf = [System.IO.Path]::ChangeExtension($html.FullName, ".pdf")
             if (Test-Path $pdf) {
-                Write-Host "📄 PDF disponible: $pdf" -ForegroundColor Cyan
+                Write-Host "📄 Informe PDF disponible: $pdf" -ForegroundColor Cyan
+            }
+            $docx = [System.IO.Path]::ChangeExtension($html.FullName, ".docx")
+            if (Test-Path $docx) {
+                Write-Host "📝 Documento Word disponible: $docx" -ForegroundColor Cyan
             }
             Write-Host ""
             Write-Host "Abriendo $($html.Name) en el navegador..." -ForegroundColor Green
@@ -90,8 +104,12 @@ if ($LASTEXITCODE -eq 0 -and (-not $NoAbrir)) {
         # Fallback: perfil único sin sufijo de grupo
         $htmlFile = Join-Path $outputDir "etapa_$Fecha.html"
         $pdfFile  = Join-Path $outputDir "etapa_$Fecha.pdf"
+        $docxFile = Join-Path $outputDir "etapa_$Fecha.docx"
         if (Test-Path $pdfFile) {
             Write-Host "📄 Informe PDF disponible: $pdfFile" -ForegroundColor Cyan
+        }
+        if (Test-Path $docxFile) {
+            Write-Host "📝 Documento Word disponible: $docxFile" -ForegroundColor Cyan
         }
         if (Test-Path $htmlFile) {
             Write-Host ""

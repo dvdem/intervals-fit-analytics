@@ -25,14 +25,17 @@ import pandas as pd
 
 from config import (
     cargar_roster,
+    obtener_crank_length_ciclista,
     OUTPUT_DIR,
     DEFAULT_RIDER_WEIGHT,
     DEFAULT_BIKE_WEIGHT,
     DEFAULT_CRANK_LENGTH,
+    DEFAULT_POWER_DURATION_CURVE_DURATIONS,
 )
 from src.intervals_api import IntervalsClient
 from src.fit_analyzer import cargar_fit, cargar_fit_con_tiempo_movimiento
 from src.pdf_reports import generar_informe_etapa_pdf
+from src.word_reports import generar_informe_etapa_word
 from src.weather_service import (
     calcular_rho_preciso,
     calcular_bearing_ciclista,
@@ -42,7 +45,13 @@ from src.weather_service import (
 )
 from src.torque_analytics import (
     calcular_torque_seguro,
+    calcular_picos_potencia_serie,
+    calcular_picos_potencia_con_contexto,
     calcular_metricas_torque_completas,
+)
+from src.power_peaks import (
+    obtener_curvas_referencia_atleta,
+    comparar_curva_actividad_con_referencia,
 )
 
 # Paleta de colores distintiva para ciclistas (estilo Pro Cycling)
@@ -97,6 +106,7 @@ def procesar_telemetria_ciclista(
     color_cfg: Dict[str, str],
     atleta_id: str = "",
     ftp: float = 380.0,
+    crank_length_m: Optional[float] = None,
     num_grid_points: int = 1000,
     dist_referencia_km: Optional[float] = None,
     clima_info: Optional[Dict[str, Any]] = None
@@ -111,6 +121,12 @@ def procesar_telemetria_ciclista(
     los ciclistas compartan el mismo eje X en los gráficos y que en el step final los
     marcadores coincidan en la meta de la etapa.
     """
+    # Longitud de biela personalizada o por defecto
+    if crank_length_m is None or pd.isna(crank_length_m) or crank_length_m <= 0:
+        crank_length_m = obtener_crank_length_ciclista(atleta_id or nombre)
+    elif crank_length_m > 10.0:
+        crank_length_m = crank_length_m / 1000.0
+
     # Filtrar paradas para trabajar exclusivamente con tiempo y telemetría en movimiento
     if 'is_moving' in df.columns:
         df_clean = df[df['is_moving']].copy()
@@ -155,16 +171,13 @@ def procesar_telemetria_ciclista(
         trq_gps, aepf_gps = calcular_torque_seguro(
             df_gps['potencia'].values,
             df_gps['cadencia'].values,
-            crank_length_m=DEFAULT_CRANK_LENGTH
+            crank_length_m=crank_length_m
         )
         df_gps['torque'] = trq_gps
         df_gps['aepf'] = aepf_gps
     else:
         df_gps['torque'] = df_gps['torque'].fillna(0.0).astype(float)
-        if 'aepf' not in df_gps.columns or df_gps['aepf'].isna().all():
-            df_gps['aepf'] = (df_gps['torque'] / DEFAULT_CRANK_LENGTH).astype(float)
-        else:
-            df_gps['aepf'] = df_gps['aepf'].fillna(0.0).astype(float)
+        df_gps['aepf'] = (df_gps['torque'] / max(0.1, crank_length_m)).astype(float)
 
     # Distancia acumulada (recalculada en movimiento para evitar derivas GPS estáticas)
     if 'distancia' not in df_gps.columns or df_gps['distancia'].isna().all() or df_gps['distancia'].max() == 0:
@@ -287,8 +300,10 @@ def procesar_telemetria_ciclista(
     torque_stats = calcular_metricas_torque_completas(
         df_gps,
         ftp=ftp_val,
-        crank_length_m=DEFAULT_CRANK_LENGTH
+        crank_length_m=crank_length_m
     )
+    stats['crank_length_mm'] = round(crank_length_m * 1000.0, 1)
+    stats['crank_length_m'] = round(crank_length_m, 4)
     stats['torque_media_nm'] = torque_stats.get('trq_media_nm', 0.0)
     stats['torque_max_nm'] = torque_stats.get('trq_max_nm', 0.0)
     stats['torque_p95_nm'] = torque_stats.get('trq_p95_nm', 0.0)
@@ -297,6 +312,20 @@ def procesar_telemetria_ciclista(
     stats['kgf_media'] = torque_stats.get('kgf_media', 0.0)
     stats['kgf_max'] = torque_stats.get('kgf_max', 0.0)
     stats['torque_mmt'] = torque_stats.get('mmt', {})
+    stats['potencia_mmp'] = torque_stats.get('mmp', {})
+    if not stats['potencia_mmp'] and 'potencia' in df_gps.columns:
+        stats['potencia_mmp'] = calcular_picos_potencia_serie(df_gps['potencia'].values)
+
+    # Curva completa de picos de potencia MMP de la actividad con desglose de fatiga (kJ previos)
+    if 'potencia' in df_gps.columns and not df_gps['potencia'].isna().all():
+        curva_mmp_completa = calcular_picos_potencia_con_contexto(
+            df_gps['potencia'].values,
+            duraciones=list(DEFAULT_POWER_DURATION_CURVE_DURATIONS.keys()),
+            peso_kg=peso
+        )
+        stats['curva_mmp_completa'] = {int(k): v for k, v in curva_mmp_completa.items() if v}
+    else:
+        stats['curva_mmp_completa'] = {}
     stats['cuadrantes'] = torque_stats.get('cuadrantes', {})
     stats['zonas_torque'] = torque_stats.get('zonas', {})
     stats['perfil_fv'] = torque_stats.get('perfil_fv', {})
@@ -1842,6 +1871,87 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .quadrant-legend-item.qiii { border-left: 3px solid #94a3b8; }
         .quadrant-legend-item.qiv { border-left: 3px solid #0284c7; }
 
+        /* Estilos de Sección de Curva de Potencia y Récords PRs */
+        .power-curve-section {
+            background: var(--bg-card);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border-card);
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: var(--card-shadow);
+            margin-bottom: 24px;
+        }
+
+        .power-curve-viz-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-card);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: var(--card-shadow);
+        }
+
+        .pr-badge-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 8px;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .pr-badge-pr {
+            background: rgba(16, 185, 129, 0.18);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.4);
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.25);
+        }
+
+        .pr-badge-top {
+            background: rgba(16, 185, 129, 0.12);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+
+        .pr-badge-alto {
+            background: rgba(245, 158, 11, 0.12);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.25);
+        }
+
+        .pr-badge-medio {
+            background: rgba(100, 116, 139, 0.12);
+            color: var(--text-muted);
+            border: 1px solid rgba(100, 116, 139, 0.2);
+        }
+
+        .pr-badge-dur-pr {
+            background: rgba(16, 185, 129, 0.18);
+            color: #10b981;
+            border: 1px solid rgba(16, 185, 129, 0.45);
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.25);
+        }
+
+        .pr-badge-dur-top {
+            background: rgba(236, 72, 153, 0.16);
+            color: #ec4899;
+            border: 1px solid rgba(236, 72, 153, 0.4);
+        }
+
+        .pr-badge-dur-carga {
+            background: rgba(245, 158, 11, 0.16);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+        }
+
+        .pr-badge-dur-fresco {
+            background: rgba(56, 189, 248, 0.14);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.35);
+        }
+
         /* Header con Logo Corporativo */
         .header-brand {
             display: flex;
@@ -3041,7 +3151,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <!-- Tabla Comparativa de Picos MMT y Cuadrantes -->
         <div class="viz-title" style="font-size: 0.92rem; margin-bottom: 12px;">
             <i data-lucide="table-2" style="color: #d97706;"></i>
-            Tabla Comparativa de Picos de Torque (MMT) y Distribución de Cuadrantes
+            Tabla Comparativa de Picos de Torque (MMT), Potencia y Distribución de Cuadrantes
         </div>
         <div style="overflow-x: auto;">
             <table class="styled-table" id="torqueSummaryTable">
@@ -3052,9 +3162,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <th>Torque Med.</th>
                         <th>Torque Máx.</th>
                         <th>Fuerza Pedal (AEPF)</th>
-                        <th>Pico 1s (Arrancada)</th>
-                        <th>Pico 5s</th>
-                        <th>Pico 30s</th>
+                        <th>Pico 1s (Trq)</th>
+                        <th>Pico 1s (Pot)</th>
+                        <th>Pico 5s (Trq)</th>
+                        <th>Pico 5s (Pot)</th>
+                        <th>Pico 30s (Trq)</th>
+                        <th>Pico 30s (Pot)</th>
                         <th>QI (Sprint/Ataque)</th>
                         <th>QII (Escalada Dura)</th>
                         <th>QIII (Recuperación)</th>
@@ -3062,6 +3175,94 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </tr>
                 </thead>
                 <tbody id="torqueTableBody"></tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- Sección de Curva de Potencia y Comparativa de Récords (PDC / MMP vs PRs) -->
+    <section class="summary-card power-curve-section" id="powerCurveSection">
+        <div class="viz-header" style="margin-bottom: 16px;">
+            <div class="viz-title">
+                <i data-lucide="zap" style="color: #ec4899;"></i>
+                Curva de Potencia (PDC / MMP) y Comparativa de Récords Históricos (PRs)
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-muted); font-weight: 500;">
+                Perfil de potencia máxima (Mean Maximal Power) de la etapa contrastado con los récords históricos (All-Time PR) y de temporada en Intervals.icu
+            </div>
+        </div>
+
+        <!-- Tarjetas Resumen KPIs de Récords de Potencia del Ciclista -->
+        <div class="torque-kpis-grid" id="powerCurveKpisContainer"></div>
+
+        <!-- Gráfico de Curva de Potencia (Power Duration Curve) -->
+        <div class="viz-card power-curve-viz-card">
+            <div class="viz-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div class="viz-title" style="font-size: 0.95rem;">
+                    <i data-lucide="trending-up" style="color: #ec4899;"></i>
+                    Perfil de Potencia vs Duración (1s - 60min)
+                </div>
+                <div class="power-curve-controls" style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                    <div class="rider-selector-wrapper" style="display: inline-flex; align-items: center; gap: 6px;">
+                        <label for="powerCurveRiderSelect" style="font-size: 0.8rem; color: var(--text-muted); font-weight: 600;">Ciclista:</label>
+                        <select id="powerCurveRiderSelect" class="custom-select">
+                        </select>
+                    </div>
+
+                    <!-- Selector de Referencia: All-Time vs Temporada -->
+                    <div class="btn-group" role="group" style="display: inline-flex; border-radius: 8px; overflow: hidden; border: 1px solid var(--border-subtle);">
+                        <button type="button" class="tab-btn active" id="btnPdcAllTime" style="padding: 4px 10px; font-size: 0.78rem;">🏆 Histórico (All-Time)</button>
+                        <button type="button" class="tab-btn" id="btnPdcSeason" style="padding: 4px 10px; font-size: 0.78rem;">📅 Temporada</button>
+                    </div>
+
+                    <!-- Selector de Unidad: Vatios vs W/kg -->
+                    <div class="btn-group" role="group" style="display: inline-flex; border-radius: 8px; overflow: hidden; border: 1px solid var(--border-subtle);">
+                        <button type="button" class="tab-btn active" id="btnPdcWatts" style="padding: 4px 10px; font-size: 0.78rem;">W</button>
+                        <button type="button" class="tab-btn" id="btnPdcWkg" style="padding: 4px 10px; font-size: 0.78rem;">W/kg</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Canvas Chart -->
+            <div class="chart-wrapper" style="min-height: 420px; position: relative;">
+                <canvas id="powerDurationCurveChart"></canvas>
+            </div>
+
+            <div class="power-curve-legend" style="margin-top: 14px; display: flex; gap: 24px; align-items: center; justify-content: center; font-size: 0.8rem; flex-wrap: wrap; padding: 8px 12px; background: var(--bg-panel-solid); border-radius: 8px;">
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <span id="legendActColor" style="display: inline-block; width: 16px; height: 14px; border-radius: 3px; background: #38bdf8;"></span>
+                    <strong id="legendActLbl">Etapa Actual (MMP)</strong>
+                </div>
+                <div style="display: flex; align-items: center; gap: 6px;">
+                    <span style="display: inline-block; width: 16px; height: 14px; border-radius: 3px; background: #f59e0b; border: 2px dashed #d97706;"></span>
+                    <strong id="legendRefLbl">Récord PR de Referencia (Intervals.icu)</strong>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabla de Esfuerzos Críticos -->
+        <div class="viz-title" style="font-size: 0.92rem; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <div>
+                <i data-lucide="award" style="color: #ec4899;"></i>
+                Tabla Detallada de Esfuerzos Críticos, % PR y Registro de Récords
+            </div>
+            <div id="pdcSummaryBadge" style="font-size: 0.8rem; font-weight: 600;"></div>
+        </div>
+        <div style="overflow-x: auto;">
+            <table class="styled-table" id="powerCurveTable">
+                <thead>
+                    <tr>
+                        <th style="width: 70px; text-align: center;">Duración</th>
+                        <th>Etapa (W | W/kg)</th>
+                        <th>Desgaste Etapa (kJ)</th>
+                        <th>Récord PR (W | W/kg)</th>
+                        <th>Desgaste PR (kJ)</th>
+                        <th>% del Récord</th>
+                        <th>Delta Potencia</th>
+                        <th>Contexto Durabilidad</th>
+                        <th>Récord Conseguido En</th>
+                    </tr>
+                </thead>
+                <tbody id="powerCurveTableBody"></tbody>
             </table>
         </div>
     </section>
@@ -3266,6 +3467,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             // Cuadrantes de Torque Biomecánico
             if (typeof updateQuadrantChartTheme === 'function') {
                 updateQuadrantChartTheme(theme);
+            }
+
+            // Curva de Potencia (PDC / MMP)
+            if (typeof powerCurveChart !== 'undefined' && powerCurveChart) {
+                if (powerCurveChart.options.scales.x) {
+                    powerCurveChart.options.scales.x.grid.color = gridColor;
+                    powerCurveChart.options.scales.x.ticks.color = tickColor;
+                }
+                if (powerCurveChart.options.scales.y) {
+                    powerCurveChart.options.scales.y.grid.color = gridColor;
+                    powerCurveChart.options.scales.y.ticks.color = tickColor;
+                }
+                if (powerCurveChart.options.plugins && powerCurveChart.options.plugins.legend) {
+                    powerCurveChart.options.plugins.legend.labels.color = tickColor;
+                }
+                powerCurveChart.update();
             }
 
             // Salud y Carga (CTL/ATL/TSB)
@@ -5947,11 +6164,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             DATA.ciclistas.forEach((c, idx) => {
                 const s = c.stats;
                 const mmt = s.torque_mmt || {};
+                const mmp = s.potencia_mmp || {};
                 const q = (s.cuadrantes && s.cuadrantes.cuadrantes) ? s.cuadrantes.cuadrantes : {};
+                const peso = s.peso_kg || 0;
 
                 const mmt1s = mmt[1] ? `${mmt[1]} N·m` : '--';
+                const mmp1s = mmp[1] ? `${Math.round(mmp[1])} W` : '--';
+                const wkg1s = (mmp[1] && peso > 0) ? ` <span style="font-size: 0.72rem; color: var(--text-muted);">(${(mmp[1] / peso).toFixed(1)} W/kg)</span>` : '';
+
                 const mmt5s = mmt[5] ? `${mmt[5]} N·m` : '--';
+                const mmp5s = mmp[5] ? `${Math.round(mmp[5])} W` : '--';
+                const wkg5s = (mmp[5] && peso > 0) ? ` <span style="font-size: 0.72rem; color: var(--text-muted);">(${(mmp[5] / peso).toFixed(1)} W/kg)</span>` : '';
+
                 const mmt30s = mmt[30] ? `${mmt[30]} N·m` : '--';
+                const mmp30s = mmp[30] ? `${Math.round(mmp[30])} W` : '--';
+                const wkg30s = (mmp[30] && peso > 0) ? ` <span style="font-size: 0.72rem; color: var(--text-muted);">(${(mmp[30] / peso).toFixed(1)} W/kg)</span>` : '';
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
@@ -5961,8 +6188,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <td><strong style="color: #d97706;">${s.torque_max_nm || '--'} N·m</strong></td>
                     <td><strong style="color: var(--text-main);">${s.aepf_media_n || '--'} N</strong> <span style="font-size: 0.72rem; color: var(--text-muted);">(${s.kgf_media || '--'} kgf)</span></td>
                     <td><strong style="color: #e11d48;">${mmt1s}</strong></td>
+                    <td><strong style="color: #f43f5e;">${mmp1s}</strong>${wkg1s}</td>
                     <td><strong style="color: #ea580c;">${mmt5s}</strong></td>
+                    <td><strong style="color: #fb923c;">${mmp5s}</strong>${wkg5s}</td>
                     <td><strong style="color: #d97706;">${mmt30s}</strong></td>
+                    <td><strong style="color: #f59e0b;">${mmp30s}</strong>${wkg30s}</td>
                     <td><span style="color: #d97706; font-weight: 600;">${q.q1_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q1_sec || 0}s)</span></td>
                     <td><span style="color: #db2777; font-weight: 600;">${q.q2_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q2_sec || 0}s)</span></td>
                     <td><span style="color: var(--text-muted);">${q.q3_pct || 0}%</span> <span style="font-size: 0.7rem; color: var(--text-muted);">(${q.q3_sec || 0}s)</span></td>
@@ -5973,7 +6203,500 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         // =========================================================
-        // 10. Módulo de Salud, Fisiología y Carga de Entrenamiento
+        // 10. Módulo de Curva de Potencia y Comparativa de Récords (PDC / MMP vs PRs)
+        // =========================================================
+        let powerCurveChart = null;
+        let selectedPowerCurveRiderIdx = 0;
+        let activePowerCurveBaseline = 'all_time'; // 'all_time' | 'temporada'
+        let activePowerCurveUnit = 'watts'; // 'watts' | 'wkg'
+
+        const PDC_DURATIONS = [1, 5, 10, 15, 30, 60, 120, 180, 300, 600, 1200, 1800, 3600];
+        const PDC_LABELS = ['1s', '5s', '10s', '15s', '30s', '1m', '2m', '3m', '5m', '10m', '20m', '30m', '60m'];
+
+        function initPowerCurveSection() {
+            if (!DATA || !DATA.ciclistas || DATA.ciclistas.length === 0) return;
+            populatePowerCurveRiderSelect();
+            setupPowerCurveControls();
+            updatePowerCurveView();
+        }
+
+        function populatePowerCurveRiderSelect() {
+            const sel = document.getElementById('powerCurveRiderSelect');
+            if (!sel) return;
+            sel.innerHTML = '';
+            DATA.ciclistas.forEach((c, idx) => {
+                const opt = document.createElement('option');
+                opt.value = String(idx);
+                opt.textContent = `${idx + 1}. ${c.stats.nombre}`;
+                if (idx === selectedPowerCurveRiderIdx) opt.selected = true;
+                sel.appendChild(opt);
+            });
+
+            sel.addEventListener('change', (e) => {
+                selectedPowerCurveRiderIdx = parseInt(e.target.value, 10) || 0;
+                updatePowerCurveView();
+            });
+        }
+
+        function setupPowerCurveControls() {
+            const btnAllTime = document.getElementById('btnPdcAllTime');
+            const btnSeason = document.getElementById('btnPdcSeason');
+            const btnWatts = document.getElementById('btnPdcWatts');
+            const btnWkg = document.getElementById('btnPdcWkg');
+
+            if (btnAllTime && btnSeason) {
+                btnAllTime.addEventListener('click', () => {
+                    activePowerCurveBaseline = 'all_time';
+                    btnAllTime.classList.add('active');
+                    btnSeason.classList.remove('active');
+                    updatePowerCurveView();
+                });
+                btnSeason.addEventListener('click', () => {
+                    activePowerCurveBaseline = 'temporada';
+                    btnSeason.classList.add('active');
+                    btnAllTime.classList.remove('active');
+                    updatePowerCurveView();
+                });
+            }
+
+            if (btnWatts && btnWkg) {
+                btnWatts.addEventListener('click', () => {
+                    activePowerCurveUnit = 'watts';
+                    btnWatts.classList.add('active');
+                    btnWkg.classList.remove('active');
+                    updatePowerCurveView();
+                });
+                btnWkg.addEventListener('click', () => {
+                    activePowerCurveUnit = 'wkg';
+                    btnWkg.classList.add('active');
+                    btnWatts.classList.remove('active');
+                    updatePowerCurveView();
+                });
+            }
+        }
+
+        function updatePowerCurveView() {
+            const c = DATA.ciclistas[selectedPowerCurveRiderIdx] || DATA.ciclistas[0];
+            if (!c) return;
+
+            renderPowerCurveKPIs(c);
+            renderPowerCurveChart(c);
+            renderPowerCurveTable(c);
+        }
+
+        function renderPowerCurveKPIs(c) {
+            const container = document.getElementById('powerCurveKpisContainer');
+            if (!container) return;
+
+            const s = c.stats || {};
+            const peso = Math.max(30.0, s.peso_kg || 70.0);
+            const mmp = s.curva_mmp_completa || {};
+            const refCurvas = (c.power_curves_ref && c.power_curves_ref[activePowerCurveBaseline]) ? c.power_curves_ref[activePowerCurveBaseline].curva : {};
+
+            const kpis = [
+                { dur: 5, label: 'Sprint 5s', desc: 'Capacidad Neuromuscular' },
+                { dur: 60, label: 'Ataque 1m', desc: 'Capacidad Anaeróbica' },
+                { dur: 300, label: 'VO2máx 5m', desc: 'Potencia Aeróbica Máx.' },
+                { dur: 1200, label: 'Umbral 20m', desc: 'Potencia Crítica / FTP' },
+            ];
+
+            let countPRs = 0;
+            const cardsHtml = kpis.map(k => {
+                const entryAct = mmp[k.dur];
+                const wAct = entryAct ? (typeof entryAct === 'object' ? Math.round(entryAct.watts) : Math.round(entryAct)) : null;
+                const kjAct = (typeof entryAct === 'object' && entryAct.kj_previos !== undefined) ? entryAct.kj_previos : null;
+                const wkgAct = (wAct && peso > 0) ? (wAct / peso).toFixed(1) : null;
+                const wRef = refCurvas && refCurvas[k.dur] ? Math.round(refCurvas[k.dur]) : null;
+
+                let pctPr = 0;
+                let badgeClass = 'pr-badge-medio';
+                let badgeTxt = '--';
+
+                if (wAct && wRef) {
+                    pctPr = ((wAct / wRef) * 100.0).toFixed(1);
+                    if (wAct >= wRef) {
+                        countPRs++;
+                        badgeClass = 'pr-badge-pr';
+                        badgeTxt = '🏆 PR';
+                    } else if (pctPr >= 95.0) {
+                        badgeClass = 'pr-badge-top';
+                        badgeTxt = `${pctPr}% PR`;
+                    } else if (pctPr >= 85.0) {
+                        badgeClass = 'pr-badge-alto';
+                        badgeTxt = `${pctPr}% PR`;
+                    } else {
+                        badgeClass = 'pr-badge-medio';
+                        badgeTxt = `${pctPr}% PR`;
+                    }
+                } else if (wAct && !wRef) {
+                    badgeClass = 'pr-badge-pr';
+                    badgeTxt = '100% PR';
+                }
+
+                const valDisplay = wAct ? `${wAct} W` : '--';
+                const kjBadgeStr = kjAct !== null ? ` • ${Math.round(kjAct)} kJ` : '';
+                const subDisplay = wkgAct ? `${wkgAct} W/kg • Ref: ${wRef || '--'} W${kjBadgeStr}` : 'Sin registro';
+
+                return `
+                    <div class="torque-kpi-card">
+                        <div class="torque-kpi-header">
+                            <span class="torque-kpi-lbl">${k.label}</span>
+                            <span class="pr-badge-pill ${badgeClass}">${badgeTxt}</span>
+                        </div>
+                        <div class="torque-kpi-val" style="color: ${s.color || '#38bdf8'};">${valDisplay}</div>
+                        <div class="torque-kpi-sub">${subDisplay}</div>
+                    </div>
+                `;
+            }).join('');
+
+            container.innerHTML = cardsHtml;
+
+            // Insignia resumen
+            const badgeContainer = document.getElementById('pdcSummaryBadge');
+            if (badgeContainer) {
+                if (countPRs > 0) {
+                    badgeContainer.innerHTML = `<span class="pr-badge-pill pr-badge-pr" style="font-size: 0.82rem; padding: 4px 12px;">🏆 ¡${countPRs} Nuevo(s) Récord(s) en la Etapa!</span>`;
+                } else {
+                    const labelRef = activePowerCurveBaseline === 'all_time' ? 'Histórico (All-Time)' : 'Temporada';
+                    badgeContainer.innerHTML = `<span style="color: var(--text-muted);">Referencia activa: <strong>${labelRef}</strong></span>`;
+                }
+            }
+        }
+
+        function renderPowerCurveChart(c) {
+            const canvas = document.getElementById('powerDurationCurveChart');
+            if (!canvas) return;
+
+            const s = c.stats || {};
+            const peso = Math.max(30.0, s.peso_kg || 70.0);
+            const mmp = s.curva_mmp_completa || {};
+            const refObj = (c.power_curves_ref && c.power_curves_ref[activePowerCurveBaseline]) || {};
+            const refCurva = refObj.curva || {};
+            const refCurvaWkg = refObj.curva_wkg || {};
+            const refActs = refObj.actividades || {};
+
+            const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+            const gridColor = isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(124, 58, 237, 0.08)';
+            const tickColor = isDark ? '#a89ec4' : '#645a78';
+            const titleColor = isDark ? '#f8fafc' : '#1e152d';
+
+            // Actualizar leyenda visual
+            const legColor = document.getElementById('legendActColor');
+            if (legColor) legColor.style.background = s.color || '#38bdf8';
+            const legActLbl = document.getElementById('legendActLbl');
+            if (legActLbl) legActLbl.textContent = `${s.nombre} - Etapa Actual (MMP)`;
+            const legRefLbl = document.getElementById('legendRefLbl');
+            if (legRefLbl) legRefLbl.textContent = `Récord PR de ${s.nombre} (${activePowerCurveBaseline === 'all_time' ? 'Histórico All-Time' : 'Temporada Actual'})`;
+
+            const unitLabel = activePowerCurveUnit === 'watts' ? 'W' : 'W/kg';
+
+            // Datos de la actividad
+            const dataAct = PDC_DURATIONS.map(d => {
+                const entry = mmp[d];
+                if (entry === undefined || entry === null) return null;
+                const w = typeof entry === 'object' ? entry.watts : entry;
+                if (w === undefined || w === null) return null;
+                return activePowerCurveUnit === 'watts' ? Math.round(w) : parseFloat((w / peso).toFixed(2));
+            });
+
+            // Datos de referencia
+            const dataRef = PDC_DURATIONS.map(d => {
+                if (activePowerCurveUnit === 'watts') {
+                    const w = refCurva[d];
+                    return (w !== undefined && w !== null) ? Math.round(w) : null;
+                } else {
+                    const wkg = refCurvaWkg[d];
+                    if (wkg !== undefined && wkg !== null) return parseFloat(Number(wkg).toFixed(2));
+                    const w = refCurva[d];
+                    return (w !== undefined && w !== null) ? parseFloat((w / peso).toFixed(2)) : null;
+                }
+            });
+
+            if (powerCurveChart) {
+                powerCurveChart.destroy();
+            }
+
+            const ctx = canvas.getContext('2d');
+            powerCurveChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: PDC_LABELS,
+                    datasets: [
+                        {
+                            label: `Etapa Actual (${unitLabel})`,
+                            data: dataAct,
+                            borderColor: s.color || '#38bdf8',
+                            backgroundColor: (s.glow || 'rgba(56, 189, 248, 0.15)'),
+                            borderWidth: 2.5,
+                            tension: 0.25,
+                            fill: true,
+                            pointRadius: 4,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: s.color || '#38bdf8',
+                            pointBorderColor: '#ffffff',
+                            pointBorderWidth: 1.5,
+                            order: 1
+                        },
+                        {
+                            label: `Récord PR (${unitLabel})`,
+                            data: dataRef,
+                            borderColor: '#f59e0b',
+                            backgroundColor: 'transparent',
+                            borderWidth: 2.2,
+                            borderDash: [6, 4],
+                            tension: 0.25,
+                            fill: false,
+                            pointRadius: 3.5,
+                            pointHoverRadius: 6,
+                            pointBackgroundColor: '#f59e0b',
+                            pointBorderColor: '#ffffff',
+                            pointBorderWidth: 1.5,
+                            order: 2
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            backgroundColor: isDark ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)',
+                            titleColor: titleColor,
+                            bodyColor: isDark ? '#e2e8f0' : '#1e293b',
+                            borderColor: isDark ? '#334155' : '#cbd5e1',
+                            borderWidth: 1,
+                            padding: 12,
+                            boxPadding: 6,
+                            usePointStyle: true,
+                            callbacks: {
+                                title: (items) => {
+                                    const idx = items[0].dataIndex;
+                                    return `Duración: ${PDC_LABELS[idx]} (${PDC_DURATIONS[idx]} seg)`;
+                                },
+                                label: (context) => {
+                                    const dsIndex = context.datasetIndex;
+                                    const val = context.parsed.y;
+                                    if (val === null || val === undefined) return null;
+
+                                    const idx = context.dataIndex;
+                                    const dur = PDC_DURATIONS[idx];
+
+                                    if (dsIndex === 0) {
+                                        const entryAct = mmp[dur] || {};
+                                        const wkgVal = (activePowerCurveUnit === 'watts' && peso > 0) ? ` (${(val / peso).toFixed(1)} W/kg)` : '';
+                                        const kjStr = (typeof entryAct === 'object' && entryAct.kj_previos !== undefined)
+                                            ? ` • Desgaste previo: ${Math.round(entryAct.kj_previos)} kJ (${entryAct.kjkg_previos || '--'} kJ/kg)`
+                                            : '';
+                                        return `⚡ Etapa Actual: ${val} ${unitLabel}${wkgVal}${kjStr}`;
+                                    } else {
+                                        const actMeta = refActs[dur] || {};
+                                        const metaStr = actMeta.nombre ? ` • ${actMeta.nombre} (${actMeta.fecha || ''})` : '';
+                                        const wkgVal = (activePowerCurveUnit === 'watts' && peso > 0) ? ` (${(val / peso).toFixed(1)} W/kg)` : '';
+                                        const kjRefStr = (actMeta.kj_previos !== undefined)
+                                            ? ` • Desgaste récord: ${Math.round(actMeta.kj_previos)} kJ (${actMeta.kjkg_previos || '--'} kJ/kg)`
+                                            : '';
+                                        return `🏆 Récord PR: ${val} ${unitLabel}${wkgVal}${metaStr}${kjRefStr}`;
+                                    }
+                                },
+                                afterBody: (items) => {
+                                    if (items.length < 2) return [];
+                                    const actVal = items[0].parsed.y;
+                                    const refVal = items[1].parsed.y;
+                                    if (!actVal || !refVal) return [];
+
+                                    const idx = items[0].dataIndex;
+                                    const dur = PDC_DURATIONS[idx];
+                                    const entryAct = mmp[dur] || {};
+                                    const actMeta = refActs[dur] || {};
+
+                                    let extraFatiga = '';
+                                    if (typeof entryAct === 'object' && entryAct.kj_previos !== undefined && actMeta.kj_previos !== undefined) {
+                                        const dKj = Math.round(entryAct.kj_previos - actMeta.kj_previos);
+                                        const signKj = dKj > 0 ? '+' : '';
+                                        extraFatiga = `\n🔋 Desgaste relativo: ${signKj}${dKj} kJ respecto al récord`;
+                                    }
+
+                                    const pct = ((actVal / refVal) * 100.0).toFixed(1);
+                                    const delta = (actVal - refVal).toFixed(activePowerCurveUnit === 'watts' ? 0 : 2);
+                                    const sign = delta > 0 ? '+' : '';
+
+                                    if (actVal >= refVal) {
+                                        return [`\n🏆 ¡NUEVO RÉCORD PERSONAL! (+${delta} ${unitLabel} • ${pct}% PR)${extraFatiga}`];
+                                    } else {
+                                        return [`\n📊 Rendimiento: ${pct}% del Récord (${sign}${delta} ${unitLabel})${extraFatiga}`];
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: gridColor },
+                            ticks: { color: tickColor, font: { family: 'Outfit', size: 11, weight: '500' } },
+                            title: { display: true, text: 'Duración del Esfuerzo Crítico (Escala Progresiva)', color: titleColor, font: { family: 'Outfit', size: 12, weight: '600' } }
+                        },
+                        y: {
+                            grid: { color: gridColor },
+                            ticks: { color: tickColor, font: { family: 'Space Mono', size: 11 } },
+                            title: { display: true, text: activePowerCurveUnit === 'watts' ? 'Potencia Media Máxima (W)' : 'Potencia Relativa (W/kg)', color: titleColor, font: { family: 'Outfit', size: 12, weight: '600' } },
+                            beginAtZero: false
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderPowerCurveTable(c) {
+            const tbody = document.getElementById('powerCurveTableBody');
+            if (!tbody) return;
+            tbody.innerHTML = '';
+
+            const s = c.stats || {};
+            const peso = Math.max(30.0, s.peso_kg || 70.0);
+            const mmp = s.curva_mmp_completa || {};
+            const refObj = (c.power_curves_ref && c.power_curves_ref[activePowerCurveBaseline]) || {};
+            const refCurva = refObj.curva || {};
+            const refCurvaWkg = refObj.curva_wkg || {};
+            const refActs = refObj.actividades || {};
+
+            const compList = (c.comparativa_picos && c.comparativa_picos[activePowerCurveBaseline]) || [];
+            const compMap = {};
+            if (Array.isArray(compList)) {
+                compList.forEach(item => { if (item && item.segundos) compMap[item.segundos] = item; });
+            }
+
+            PDC_DURATIONS.forEach((d, idx) => {
+                const label = PDC_LABELS[idx];
+                const item = compMap[d] || {};
+
+                // 1. Datos de la etapa actual
+                const entryAct = mmp[d];
+                const wAct = item.vatios_act !== undefined ? item.vatios_act : (entryAct ? (typeof entryAct === 'object' ? Math.round(entryAct.watts) : Math.round(entryAct)) : null);
+                const wkgAct = item.wkg_act !== undefined ? item.wkg_act : ((wAct && peso > 0) ? (wAct / peso).toFixed(1) : '--');
+                const kjAct = item.kj_act !== undefined ? item.kj_act : (typeof entryAct === 'object' ? entryAct.kj_previos : null);
+                const kjkgAct = item.kjkg_act !== undefined ? item.kjkg_act : (typeof entryAct === 'object' ? entryAct.kjkg_previos : null);
+                const tiempoAct = item.tiempo_act || (typeof entryAct === 'object' ? entryAct.tiempo_inicio_str : '');
+                const pctEtapaAct = item.pct_etapa_act || (typeof entryAct === 'object' ? entryAct.pct_etapa : null);
+
+                // 2. Datos del récord PR de referencia
+                const wRef = item.vatios_ref !== undefined ? item.vatios_ref : (refCurva[d] ? Math.round(refCurva[d]) : null);
+                let wkgRef = item.wkg_ref !== undefined ? item.wkg_ref : '--';
+                if (wkgRef === '--') {
+                    if (refCurvaWkg[d]) {
+                        wkgRef = Number(refCurvaWkg[d]).toFixed(1);
+                    } else if (wRef && peso > 0) {
+                        wkgRef = (wRef / peso).toFixed(1);
+                    }
+                }
+                const actMeta = refActs[d] || {};
+                const kjRef = item.kj_ref !== undefined ? item.kj_ref : actMeta.kj_previos;
+                const kjkgRef = item.kjkg_ref !== undefined ? item.kjkg_ref : actMeta.kjkg_previos;
+                const tiempoRef = item.tiempo_ref || actMeta.tiempo_hms || '';
+
+                // 3. Comparativas de vatios
+                let pctPr = item.pct_pr || 0;
+                let badgeClass = 'pr-badge-medio';
+                let badgeTxt = item.badge_texto || '--';
+                let deltaWStr = '--';
+                let deltaColor = 'var(--text-muted)';
+
+                if (wAct && wRef) {
+                    pctPr = item.pct_pr || ((wAct / wRef) * 100.0).toFixed(1);
+                    const deltaW = item.delta_w !== undefined ? item.delta_w : Math.round(wAct - wRef);
+                    const deltaWkg = item.delta_wkg !== undefined ? item.delta_wkg : ((wAct - wRef) / peso).toFixed(2);
+                    const sign = deltaW > 0 ? '+' : '';
+                    deltaWStr = `${sign}${deltaW} W (${sign}${deltaWkg} W/kg)`;
+
+                    if (wAct >= wRef) {
+                        badgeClass = 'pr-badge-pr';
+                        badgeTxt = item.badge_texto || `🏆 PR (${pctPr}%)`;
+                        deltaColor = '#10b981';
+                    } else if (pctPr >= 95.0) {
+                        badgeClass = 'pr-badge-top';
+                        badgeTxt = item.badge_texto || `${pctPr}% PR`;
+                        deltaColor = '#10b981';
+                    } else if (pctPr >= 85.0) {
+                        badgeClass = 'pr-badge-alto';
+                        badgeTxt = item.badge_texto || `${pctPr}% PR`;
+                        deltaColor = '#f59e0b';
+                    } else {
+                        badgeClass = 'pr-badge-medio';
+                        badgeTxt = item.badge_texto || `${pctPr}% PR`;
+                        deltaColor = 'var(--text-muted)';
+                    }
+                } else if (wAct && !wRef) {
+                    badgeClass = 'pr-badge-pr';
+                    badgeTxt = '100% PR';
+                    deltaWStr = 'Primer registro';
+                    deltaColor = '#10b981';
+                }
+
+                // 4. Desglose energético de la etapa
+                let etapaKjDisplay = '<span style="color: var(--text-muted);">--</span>';
+                if (kjAct !== null && kjAct !== undefined && wAct > 0) {
+                    const tiempoInfo = tiempoAct ? `@ ${tiempoAct}${pctEtapaAct ? ' (' + pctEtapaAct + '%)' : ''}` : '';
+                    etapaKjDisplay = `
+                        <div style="font-weight: 600; color: #38bdf8;">${Math.round(kjAct)} kJ <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: normal;">(${kjkgAct || '--'} kJ/kg)</span></div>
+                        <div style="font-size: 0.72rem; color: var(--text-muted);">${tiempoInfo}</div>
+                    `;
+                }
+
+                // 5. Desglose energético del récord
+                let refKjDisplay = '<span style="color: var(--text-muted);">--</span>';
+                if (kjRef !== null && kjRef !== undefined && wRef > 0) {
+                    const tiempoInfo = tiempoRef ? `@ ${tiempoRef}` : '';
+                    refKjDisplay = `
+                        <div style="font-weight: 600; color: #f59e0b;">${Math.round(kjRef)} kJ <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: normal;">(${kjkgRef || '--'} kJ/kg)</span></div>
+                        <div style="font-size: 0.72rem; color: var(--text-muted);">${tiempoInfo}</div>
+                    `;
+                }
+
+                // 6. Contexto de durabilidad y fatiga
+                const durBadge = item.badge_durabilidad || '--';
+                const durColor = item.badge_durabilidad_color || '#94a3b8';
+                const deltaKj = item.delta_kj;
+                let durContextDisplay = '<span style="color: var(--text-muted);">--</span>';
+                if (durBadge && durBadge !== '--') {
+                    const deltaKjStr = (deltaKj !== null && deltaKj !== undefined)
+                        ? `<div style="font-size: 0.70rem; color: ${deltaKj > 0 ? '#10b981' : 'var(--text-muted)'}; margin-top: 2px;">${deltaKj > 0 ? '+' : ''}${Math.round(deltaKj)} kJ vs PR</div>`
+                        : '';
+                    durContextDisplay = `
+                        <span class="pr-badge-pill" style="background: ${durColor}18; color: ${durColor}; border: 1px solid ${durColor}40;">${durBadge}</span>
+                        ${deltaKjStr}
+                    `;
+                }
+
+                // 7. Récord obtenido en
+                let recordInfoStr = '--';
+                if (actMeta.nombre) {
+                    recordInfoStr = `<span style="font-weight: 500;">${actMeta.nombre}</span> <span style="font-size: 0.72rem; color: var(--text-muted);">(${actMeta.fecha || ''})</span>`;
+                }
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td style="text-align: center;"><strong>${label}</strong></td>
+                    <td><strong style="color: ${s.color || '#38bdf8'};">${wAct ? wAct + ' W' : '--'}</strong> <span style="font-size: 0.78rem; color: var(--text-muted);">(${wkgAct !== '--' ? wkgAct + ' W/kg' : '--'})</span></td>
+                    <td>${etapaKjDisplay}</td>
+                    <td><strong style="color: #d97706;">${wRef ? wRef + ' W' : '--'}</strong> <span style="font-size: 0.78rem; color: var(--text-muted);">(${wkgRef !== '--' ? wkgRef + ' W/kg' : '--'})</span></td>
+                    <td>${refKjDisplay}</td>
+                    <td><span class="pr-badge-pill ${badgeClass}">${badgeTxt}</span></td>
+                    <td><strong style="color: ${deltaColor};">${deltaWStr}</strong></td>
+                    <td>${durContextDisplay}</td>
+                    <td>${recordInfoStr}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        // =========================================================
+        // 11. Módulo de Salud, Fisiología y Carga de Entrenamiento
         // =========================================================
         let healthLoadChart = null;
         let activeHealthMetric = 'fitness_freshness';
@@ -6664,6 +7387,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             initSegmentAnalysis();
             initMetabolicSection();
             initTorqueSection();
+            initPowerCurveSection();
             initHealthSection();
             initMap();
             initElevationChart();
@@ -6874,6 +7598,43 @@ def recopilar_datos_salud_y_carga(
     return wellness_map
 
 
+def recopilar_curvas_potencia_referencia(
+    client: Optional[IntervalsClient],
+    ciclistas_proc: List[Dict[str, Any]],
+    roster_df: Optional[pd.DataFrame] = None
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Recopila las curvas de potencia de referencia (All-Time PR y Temporada)
+    desde la API de Intervals.icu para cada ciclista procesado.
+    """
+    roster_df = roster_df if roster_df is not None else cargar_roster()
+    nombres_map = dict(zip(roster_df['intervals_id'], roster_df['Name'])) if not roster_df.empty else {}
+    id_por_nombre = {str(name): str(aid) for aid, name in nombres_map.items()}
+
+    curvas_map = {}
+    for c in ciclistas_proc:
+        stats = c.get('stats', {})
+        aid = str(stats.get('atleta_id', '')).strip()
+        nom = stats.get('nombre', '')
+        peso_nominal = float(stats.get('peso_kg') or DEFAULT_RIDER_WEIGHT)
+
+        if (not aid or aid.startswith('Ciclista') or (not aid.isdigit() and not aid.startswith('i'))) and nom in id_por_nombre:
+            aid = id_por_nombre[nom]
+
+        curvas_atleta = {'disponible': False, 'all_time': {}, 'temporada': {}}
+        if client is not None and aid and not aid.startswith('Ciclista_'):
+            try:
+                curvas_atleta = obtener_curvas_referencia_atleta(client, aid, peso_kg=peso_nominal)
+            except Exception as e:
+                print(f"⚠️ No se pudieron obtener curvas de potencia para {nom} ({aid}): {e}")
+
+        curvas_map[nom] = curvas_atleta
+        if aid:
+            curvas_map[aid] = curvas_atleta
+
+    return curvas_map
+
+
 def generar_html_dashboard_interactivo(
     etapa_info: Dict[str, Any],
     ciclistas_proc: List[Dict[str, Any]],
@@ -6911,6 +7672,8 @@ def generar_html_dashboard_interactivo(
                 'by_time': c['samples_by_time'],
                 'desglose_horas': c.get('desglose_horas', []),
                 'wellness_load': c.get('wellness_load', {}),
+                'power_curves_ref': c.get('power_curves_ref', {}),
+                'comparativa_picos': c.get('comparativa_picos', {}),
             }
             for c in ciclistas_proc
         ],
@@ -7010,6 +7773,8 @@ def resolver_metadatos_ciclistas(
     ftp_map = dict(zip(roster_df['intervals_id'], roster_df['FTP'])) if not roster_df.empty and 'FTP' in roster_df.columns else {}
     nombres_ftp_map = dict(zip(roster_df['Name'], roster_df['FTP'])) if not roster_df.empty and 'FTP' in roster_df.columns else {}
     carrera_map = dict(zip(roster_df['intervals_id'], roster_df.get('carrera', 0))) if not roster_df.empty and 'carrera' in roster_df.columns else {}
+    biela_map = dict(zip(roster_df['intervals_id'], roster_df['crank_length_m'])) if not roster_df.empty and 'crank_length_m' in roster_df.columns else {}
+    nombres_biela_map = dict(zip(roster_df['Name'], roster_df['crank_length_m'])) if not roster_df.empty and 'crank_length_m' in roster_df.columns else {}
 
     meta_map = {}
     
@@ -7024,6 +7789,7 @@ def resolver_metadatos_ciclistas(
                 name = a.get('athlete_name', nombres_map.get(aid, f"Atleta_{aid}"))
                 w = float(a.get('weight') or pesos_map.get(aid, DEFAULT_RIDER_WEIGHT))
                 ftp_val = float(a.get('icu_ftp') or ftp_map.get(aid, nombres_ftp_map.get(name, 380.0)))
+                crank_m = float(biela_map.get(aid, nombres_biela_map.get(name, DEFAULT_CRANK_LENGTH)))
                 es_carrera = int(carrera_map.get(aid, 1 if not carrera_map else 0))
                 acts = client.get_activities(aid, oldest=inicio, newest=hoy + timedelta(days=1))
                 for act in acts:
@@ -7033,6 +7799,7 @@ def resolver_metadatos_ciclistas(
                             'nombre': name,
                             'peso': w,
                             'ftp': ftp_val,
+                            'crank_length_m': crank_m,
                             'atleta_id': aid,
                             'carrera': es_carrera,
                             'act_name': act.get('name', '')
@@ -7043,10 +7810,12 @@ def resolver_metadatos_ciclistas(
     # 2. Añadir también los IDs del roster directamente
     for aid, name in nombres_map.items():
         aid_str = str(aid).strip()
+        crank_m = float(biela_map.get(aid, nombres_biela_map.get(name, DEFAULT_CRANK_LENGTH)))
         meta_map[aid_str] = {
             'nombre': name,
             'peso': float(pesos_map.get(aid, DEFAULT_RIDER_WEIGHT)),
             'ftp': float(ftp_map.get(aid, nombres_ftp_map.get(name, 380.0))),
+            'crank_length_m': crank_m,
             'atleta_id': aid_str,
             'carrera': int(carrera_map.get(aid, 0)),
             'act_name': ''
@@ -7094,10 +7863,12 @@ def resolver_metadatos_ciclistas(
 
                 if matched_aid:
                     name = nombres_map[matched_aid]
+                    crank_m = float(biela_map.get(matched_aid, nombres_biela_map.get(name, DEFAULT_CRANK_LENGTH)))
                     meta_map[stem] = {
                         'nombre': name,
                         'peso': float(pesos_map.get(matched_aid, DEFAULT_RIDER_WEIGHT)),
                         'ftp': float(ftp_map.get(matched_aid, nombres_ftp_map.get(name, 380.0))),
+                        'crank_length_m': crank_m,
                         'atleta_id': str(matched_aid).strip(),
                         'carrera': int(carrera_map.get(matched_aid, 0)),
                         'act_name': ''
@@ -7351,16 +8122,26 @@ def generar_dashboard_perfil_interactivo(
     output_html: Optional[Union[str, Path]] = None,
     output_pdf: Optional[Union[str, Path]] = None,
     generar_pdf: bool = True,
+    output_docx: Optional[Union[str, Path]] = None,
+    generar_docx: bool = False,
+    formato_informe: str = 'pdf',
     fits_temporales_limpiar: Optional[List[Union[str, Path]]] = None
 ) -> Path:
     """
     Función principal para procesar los archivos FIT / datos con posicionamiento y generar
     el informe interactivo HTML completo, sincronizado desde el primer punto común.
     """
+    formato_lower = str(formato_informe).lower().strip()
+    debe_generar_docx = generar_docx or (formato_lower in ['docx', 'ambos', 'word'])
+    debe_generar_pdf = (generar_pdf and formato_lower not in ['docx', 'word', 'ninguno']) or (formato_lower in ['ambos', 'pdf'])
+    if not generar_pdf:
+        debe_generar_pdf = False
+
     roster_df = roster_df if roster_df is not None else cargar_roster()
     meta_map = resolver_metadatos_ciclistas(archivos_o_datos, client=client, roster_df=roster_df)
 
     nombres_ftp_map = dict(zip(roster_df['Name'], roster_df['FTP'])) if not roster_df.empty and 'FTP' in roster_df.columns else {}
+    nombres_biela_map = dict(zip(roster_df['Name'], roster_df['crank_length_m'])) if not roster_df.empty and 'crank_length_m' in roster_df.columns else {}
 
     # Identificar IDs que tienen carrera > 0 (cualquier grupo de competición)
     ids_carrera = set()
@@ -7380,6 +8161,7 @@ def generar_dashboard_perfil_interactivo(
             nombre = meta.get('nombre', stem)
             peso = float(meta.get('peso', DEFAULT_RIDER_WEIGHT))
             ftp = float(meta.get('ftp', nombres_ftp_map.get(nombre, 380.0)))
+            crank_length_m = float(meta.get('crank_length_m', nombres_biela_map.get(nombre, DEFAULT_CRANK_LENGTH)))
             aid = str(meta.get('atleta_id', stem)).strip()
             es_carrera = meta.get('carrera', 1 if (aid in ids_carrera or nombre in nombres_carrera) else 0)
 
@@ -7405,6 +8187,7 @@ def generar_dashboard_perfil_interactivo(
             nombre = item.get('nombre', f"Ciclista_{idx+1}")
             peso = float(item.get('peso', DEFAULT_RIDER_WEIGHT))
             ftp = float(item.get('ftp', nombres_ftp_map.get(nombre, 380.0)))
+            crank_length_m = float(item.get('crank_length_m', nombres_biela_map.get(nombre, DEFAULT_CRANK_LENGTH)))
             aid = str(item.get('atleta_id', '')).strip()
             es_carrera = item.get('carrera', 1 if (aid in ids_carrera or nombre in nombres_carrera) else 0)
 
@@ -7430,6 +8213,7 @@ def generar_dashboard_perfil_interactivo(
             'peso': peso,
             'ftp': ftp,
             'atleta_id': aid,
+            'crank_length_m': crank_length_m,
         })
 
     if not ciclistas_raw:
@@ -7564,11 +8348,12 @@ def generar_dashboard_perfil_interactivo(
             encoding='utf-8'
         )
 
-        if generar_pdf:
+        etapa_info_bio = {'distancia_total_km': 0, 'desnivel_pos_m': 0,
+                          'perfil_lat': [], 'perfil_lon': [], 'perfil_alt': [],
+                          'perfil_dist_km': [], 'nombre_ciclistas': [c['stats']['nombre'] for c in ciclistas_proc_bio]}
+
+        if debe_generar_pdf:
             try:
-                etapa_info_bio = {'distancia_total_km': 0, 'desnivel_pos_m': 0,
-                                  'perfil_lat': [], 'perfil_lon': [], 'perfil_alt': [],
-                                  'perfil_dist_km': [], 'nombre_ciclistas': [c['stats']['nombre'] for c in ciclistas_proc_bio]}
                 pdf_target = output_pdf or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.pdf")
                 print(f"📄 Generando informe PDF de biometría en: {pdf_target}...")
                 ruta_pdf = generar_informe_etapa_pdf(
@@ -7581,6 +8366,21 @@ def generar_dashboard_perfil_interactivo(
                 print(f"✅ ¡Informe PDF generado con éxito! Archivo: {ruta_pdf.resolve()}")
             except Exception as e:
                 print(f"⚠️ No se pudo generar el informe PDF de biometría: {e}")
+
+        if debe_generar_docx:
+            try:
+                docx_target = output_docx or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.docx")
+                print(f"📝 Generando documento Word de biometría en: {docx_target}...")
+                ruta_docx = generar_informe_etapa_word(
+                    etapa_info=etapa_info_bio,
+                    ciclistas_proc=ciclistas_proc_bio,
+                    wellness_carga_map=wellness_carga_map,
+                    titulo=titulo_final,
+                    output_docx=docx_target
+                )
+                print(f"✅ ¡Documento Word generado con éxito! Archivo: {ruta_docx.resolve()}")
+            except Exception as e:
+                print(f"⚠️ No se pudo generar el documento Word de biometría: {e}")
 
         if fits_temporales_limpiar:
             for f_temp in fits_temporales_limpiar:
@@ -7684,6 +8484,7 @@ def generar_dashboard_perfil_interactivo(
                 color_cfg=color_cfg,
                 atleta_id=r['atleta_id'],
                 ftp=r.get('ftp', 380.0),
+                crank_length_m=r.get('crank_length_m', DEFAULT_CRANK_LENGTH),
                 dist_referencia_km=dist_ref_etapa,
                 clima_info=clima_etapa
             )
@@ -7748,6 +8549,40 @@ def generar_dashboard_perfil_interactivo(
         nom = c['stats'].get('nombre', '')
         c['wellness_load'] = wellness_carga_map.get(aid) or wellness_carga_map.get(nom) or {}
 
+    # Recopilar curvas de potencia de referencia (All-Time PR y Temporada) de Intervals.icu
+    print(f"⚡ Recopilando curvas de potencia de referencia (PR All-Time / Temporada) para {len(ciclistas_proc)} ciclistas...")
+    curvas_potencia_map = recopilar_curvas_potencia_referencia(
+        client=client,
+        ciclistas_proc=ciclistas_proc,
+        roster_df=roster_df
+    )
+    for c in ciclistas_proc:
+        aid = str(c['stats'].get('atleta_id', '')).strip()
+        nom = c['stats'].get('nombre', '')
+        curvas_ref = curvas_potencia_map.get(aid) or curvas_potencia_map.get(nom) or {'disponible': False, 'all_time': {}, 'temporada': {}}
+        c['power_curves_ref'] = curvas_ref
+
+        # Comparativas calculadas de antemano: All-Time y Temporada
+        mmp_actividad = c['stats'].get('curva_mmp_completa', {})
+        comp_all_time = comparar_curva_actividad_con_referencia(
+            picos_actividad=mmp_actividad,
+            curva_referencia=curvas_ref.get('all_time', {}).get('curva', {}),
+            peso_kg=c['stats'].get('peso_kg', DEFAULT_RIDER_WEIGHT),
+            duraciones_obj=DEFAULT_POWER_DURATION_CURVE_DURATIONS,
+            actividades_meta=curvas_ref.get('all_time', {}).get('actividades', {})
+        )
+        comp_temporada = comparar_curva_actividad_con_referencia(
+            picos_actividad=mmp_actividad,
+            curva_referencia=curvas_ref.get('temporada', {}).get('curva', {}),
+            peso_kg=c['stats'].get('peso_kg', DEFAULT_RIDER_WEIGHT),
+            duraciones_obj=DEFAULT_POWER_DURATION_CURVE_DURATIONS,
+            actividades_meta=curvas_ref.get('temporada', {}).get('actividades', {})
+        )
+        c['comparativa_picos'] = {
+            'all_time': comp_all_time,
+            'temporada': comp_temporada
+        }
+
     # Generar HTML
     _grupo_label = f" | Carrera {grupo_carrera}" if grupo_carrera is not None else ""
     titulo_final = titulo or f"Etapa {etapa_info['distancia_total_km']} km (+{etapa_info['desnivel_pos_m']}m D+){_grupo_label} | Perfil Sincronizado"
@@ -7775,7 +8610,7 @@ def generar_dashboard_perfil_interactivo(
         f.write(html_content)
 
     # Generar también el informe ejecutivo en PDF
-    if generar_pdf:
+    if debe_generar_pdf:
         try:
             pdf_target = output_pdf or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.pdf")
             print(f"📄 Generando informe PDF completo de la etapa en: {pdf_target}...")
@@ -7789,6 +8624,22 @@ def generar_dashboard_perfil_interactivo(
             print(f"✅ ¡Informe PDF generado con éxito! Archivo: {ruta_pdf.resolve()}")
         except Exception as e:
             print(f"⚠️ No se pudo generar el informe PDF: {e}")
+
+    # Generar también el informe ejecutivo en Word (.docx)
+    if debe_generar_docx:
+        try:
+            docx_target = output_docx or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.docx")
+            print(f"📝 Generando documento Word completo de la etapa en: {docx_target}...")
+            ruta_docx = generar_informe_etapa_word(
+                etapa_info=etapa_info,
+                ciclistas_proc=ciclistas_proc,
+                wellness_carga_map=wellness_carga_map,
+                titulo=titulo_final,
+                output_docx=docx_target
+            )
+            print(f"✅ ¡Documento Word generado con éxito! Archivo: {ruta_docx.resolve()}")
+        except Exception as e:
+            print(f"⚠️ No se pudo generar el documento Word: {e}")
 
     # Limpieza automática de archivos FIT temporales de la API (las actividades no-Strava)
     if fits_temporales_limpiar:

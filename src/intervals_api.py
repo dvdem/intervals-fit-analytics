@@ -206,6 +206,19 @@ class IntervalsClient:
             pass
         return None
 
+    def get_activity_power_curve_json(self, activity_id: Union[str, int]) -> Optional[Dict[str, Any]]:
+        """
+        Descarga la curva de potencia en JSON de una actividad, incluyendo
+        los vectores de secs, watts, start_index y end_index.
+        """
+        try:
+            resp = self._request("GET", f"activity/{activity_id}/power-curve.json")
+            if resp.status_code == 200:
+                return resp.json()
+        except Exception:
+            pass
+        return None
+
     def get_activity_streams(
         self,
         activity_id: Union[str, int],
