@@ -699,6 +699,93 @@ body, .sidebar, .topbar, .panel, .kpi-card, .race-card, .modal-card, .form-contr
   border: 1px solid rgba(148, 163, 184, 0.2);
 }
 
+.badge-pr {
+  background-color: rgba(16, 185, 129, 0.16);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.38);
+  font-weight: 700;
+}
+[data-theme="dark"] .badge-pr {
+  color: #10b981;
+}
+
+.badge-pr-near {
+  background-color: rgba(2, 132, 199, 0.14);
+  color: #0284c7;
+  border: 1px solid rgba(2, 132, 199, 0.32);
+}
+[data-theme="dark"] .badge-pr-near {
+  color: #38bdf8;
+}
+
+.badge-pr-mid {
+  background-color: rgba(217, 119, 6, 0.14);
+  color: #d97706;
+  border: 1px solid rgba(217, 119, 6, 0.32);
+}
+[data-theme="dark"] .badge-pr-mid {
+  color: #f59e0b;
+}
+
+.badge-pr-sub {
+  background-color: rgba(100, 116, 139, 0.12);
+  color: #64748b;
+  border: 1px solid rgba(100, 116, 139, 0.25);
+}
+
+/* Celdas comparativas de picos de potencia */
+.peak-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.peak-cell-main {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.peak-cell-val {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.96rem;
+  color: var(--text-bright);
+}
+
+.peak-cell-val.is-pr {
+  color: #059669;
+}
+[data-theme="dark"] .peak-cell-val.is-pr {
+  color: #10b981;
+}
+
+.peak-cell-wkg {
+  font-family: var(--font-mono);
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--accent-cyan);
+}
+
+.peak-cell-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.peak-cell-record {
+  font-family: var(--font-mono);
+  font-size: 0.77rem;
+  color: var(--text-dim);
+}
+
+#load-chart-metric-buttons .btn.active {
+  background: var(--accent-cyan);
+  color: #ffffff;
+  border-color: var(--accent-cyan);
+}
+
 /* =============================================================================
    STAGE ANALYSIS VIEWER (EMBEDDED IFRAME / PROFILE)
    ============================================================================= */
@@ -1208,4 +1295,173 @@ body, .sidebar, .topbar, .panel, .kpi-card, .race-card, .modal-card, .form-contr
   .content-area {
     padding: 16px;
   }
+}
+
+/* =============================================================================
+   GESTIÓN DE USUARIOS, SESIÓN Y CONTROL DE ACCESO (RBAC)
+   ============================================================================= */
+
+/* Widget de Sesión de Usuario en Topbar */
+.user-session-widget {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.user-profile-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-card);
+}
+
+.user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+}
+
+.user-info-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+
+.user-name {
+  font-size: 0.84rem;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.badge-role {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-role-admin {
+  background: rgba(2, 132, 199, 0.14);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(2, 132, 199, 0.35);
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.76rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-role-editor {
+  background: rgba(5, 150, 105, 0.14);
+  color: var(--accent-emerald);
+  border: 1px solid rgba(5, 150, 105, 0.35);
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.76rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-role-visor {
+  background: rgba(217, 119, 6, 0.14);
+  color: var(--accent-amber);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  font-size: 0.76rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.badge-status-active {
+  background: rgba(5, 150, 105, 0.12);
+  color: var(--accent-emerald);
+  border: 1px solid rgba(5, 150, 105, 0.25);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.badge-status-inactive {
+  background: rgba(225, 29, 72, 0.12);
+  color: var(--accent-rose);
+  border: 1px solid rgba(225, 29, 72, 0.25);
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.btn-logout {
+  color: var(--accent-rose);
+  border-color: rgba(225, 29, 72, 0.25);
+}
+
+.btn-logout:hover {
+  background: rgba(225, 29, 72, 0.1);
+  border-color: var(--accent-rose);
+  color: var(--accent-rose);
+}
+
+/* Banner de Notificación para Modo Visor */
+.visor-notice-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  margin-bottom: 20px;
+  background: rgba(217, 119, 6, 0.1);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  animation: slideDown 0.3s ease;
+}
+
+.visor-banner-icon {
+  font-size: 1.4rem;
+  color: var(--accent-amber);
+}
+
+.visor-banner-content {
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
+@keyframes slideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Botones de acción en tabla de usuarios */
+.user-table-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-user-action {
+  padding: 4px 8px;
+  font-size: 0.76rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }

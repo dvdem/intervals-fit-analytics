@@ -1,0 +1,23 @@
+[Unit]
+Description=Intervals Fit Analytics Platform (FastAPI + Uvicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/var/www/intervals_fit_analytics
+Environment="PATH=/var/www/intervals_fit_analytics/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/var/www/intervals_fit_analytics/.venv/bin/uvicorn web.app:app --host 127.0.0.1 --port 8000 --workers 2 --access-log
+Restart=always
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=intervals-web
+
+# Medidas básicas de seguridad para el proceso
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

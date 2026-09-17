@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Intervals Fit Analytics - Pro Cycling Platform</title>
-  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/style.css?v=2.2">
   <!-- Chart.js para visualizaciones dinámicas de potencia y fatiga -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -53,6 +53,12 @@
           <span>Gestión de Equipo</span>
         </button>
       </li>
+      <li class="nav-item admin-only-nav" data-tab="tab-users" id="nav-item-users" style="display: none;">
+        <button type="button">
+          <span class="nav-icon">🔐</span>
+          <span>Gestión de Usuarios</span>
+        </button>
+      </li>
     </ul>
 
     <div class="sidebar-footer">
@@ -70,6 +76,21 @@
         <h1 class="topbar-title" id="page-title">Dashboard General del Equipo</h1>
       </div>
       <div class="topbar-right">
+        <!-- Widget de Usuario y Sesión -->
+        <div class="user-session-widget" id="user-session-widget">
+          <div class="user-profile-pill">
+            <span class="user-avatar" id="topbar-user-avatar">👑</span>
+            <div class="user-info-text">
+              <span class="user-name" id="topbar-username">admin</span>
+              <span class="badge-role" id="topbar-user-role">Administrador</span>
+            </div>
+          </div>
+          <button class="btn btn-secondary btn-sm btn-logout" id="btn-logout" title="Cerrar Sesión">
+            <span>🚪</span>
+            <span>Salir</span>
+          </button>
+        </div>
+
         <button class="btn btn-secondary btn-sm" id="btn-theme-toggle" title="Cambiar Tema (Claro / Oscuro)">
           <span id="theme-toggle-icon">🌙</span>
           <span id="theme-toggle-text">Modo Oscuro</span>
@@ -86,6 +107,14 @@
     </header>
 
     <div class="content-area">
+
+      <!-- Banner Informativo para Rol Visor -->
+      <div id="visor-notice-banner" class="visor-notice-banner" style="display: none;">
+        <span class="visor-banner-icon">👁️</span>
+        <div class="visor-banner-content">
+          <strong>Modo Visor (Solo Lectura):</strong> Tu perfil tiene permisos exclusivos de visualización y consulta. Las operaciones de registro, edición y eliminación están reservadas para Editores y Administradores.
+        </div>
+      </div>
 
       <!-- ===================================================================
            PESTAÑA 1: DASHBOARD GENERAL
@@ -289,26 +318,40 @@
 
         <!-- Tabla Comparativa de Picos -->
         <div class="panel">
-          <div class="panel-header">
-            <h3 class="panel-title"><span>⚡</span> Tabla Comparativa de Picos de Potencia Recientes</h3>
+          <div class="panel-header" style="align-items: flex-start; gap: 14px;">
+            <div>
+              <h3 class="panel-title"><span>⚡</span> Tabla Comparativa de Picos de Potencia (Reciente vs Récord Histórico PR)</h3>
+              <p style="margin: 4px 0 0 0; font-size: 0.82rem; color: var(--text-muted);">
+                Comparativa de los 6 esfuerzos críticos estándar (5s, 30s, 1m, 5m, 10m, 20m) frente al mejor registro absoluto (All-Time PR).
+              </p>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+              <div class="btn-group" id="peaks-table-view-toggle" style="display: flex; gap: 4px; background: var(--input-bg); padding: 3px; border-radius: var(--radius-sm); border: 1px solid var(--border-medium);">
+                <button type="button" class="btn btn-sm active" id="btn-peaks-view-compact" data-view="compact" style="padding: 4px 10px; font-size: 0.78rem;">Vista Compacta</button>
+                <button type="button" class="btn btn-sm btn-secondary" id="btn-peaks-view-split" data-view="split" style="padding: 4px 10px; font-size: 0.78rem;">Columnas Separadas</button>
+              </div>
+              <div style="display: flex; gap: 6px; align-items: center;">
+                <span class="badge badge-pr" style="font-size: 0.72rem;">🏆 PR</span>
+                <span class="badge badge-pr-near" style="font-size: 0.72rem;">🔥 ≥95%</span>
+                <span class="badge badge-pr-mid" style="font-size: 0.72rem;">⚡ 85-94%</span>
+              </div>
+            </div>
           </div>
           <div class="table-responsive">
             <table class="data-table" id="table-peaks-report">
-              <thead>
+              <thead id="thead-peaks-report">
                 <tr>
-                  <th>Ciclista</th>
-                  <th>5s (W)</th>
-                  <th>5s (W/kg)</th>
-                  <th>1m (W)</th>
-                  <th>1m (W/kg)</th>
-                  <th>5m (W)</th>
-                  <th>5m (W/kg)</th>
-                  <th>20m (W)</th>
-                  <th>20m (W/kg)</th>
+                  <th style="min-width: 170px;">Ciclista</th>
+                  <th>5s (Sprint)</th>
+                  <th>30s (Sprint L.)</th>
+                  <th>1m (Anaerób.)</th>
+                  <th>5m (VO2máx)</th>
+                  <th>10m (Ataque)</th>
+                  <th>20m (FTP / Umbral)</th>
                 </tr>
               </thead>
               <tbody id="tbody-peaks-report">
-                <tr><td colspan="9" style="text-align: center; color: var(--text-dim);">Haz clic en "Actualizar Vista" para cargar los picos.</td></tr>
+                <tr><td colspan="7" style="text-align: center; color: var(--text-dim);">Haz clic en "Actualizar Vista" para cargar los picos.</td></tr>
               </tbody>
             </table>
           </div>
@@ -317,17 +360,49 @@
         <!-- Gráfico Comparativo de Potencias -->
         <div class="panel">
           <div class="panel-header">
-            <h3 class="panel-title"><span>📊</span> Comparativa Gráfica de Picos Clave (5s vs 1m vs 5m vs 20m)</h3>
+            <div>
+              <h3 class="panel-title"><span>📊</span> Comparativa Gráfica de Picos Clave (Reciente vs Récord Histórico PR)</h3>
+              <p style="margin: 4px 0 0 0; font-size: 0.82rem; color: var(--text-muted);">
+                Potencia relativa (W/kg) en esfuerzos clave comparada con la referencia del mejor registro histórico PR.
+              </p>
+            </div>
           </div>
           <div style="height: 380px; position: relative;">
             <canvas id="chart-peaks-comparison"></canvas>
           </div>
         </div>
 
+        <!-- Gráfico de Evolución de Carga (CTL / ATL / TSB) -->
+        <div class="panel">
+          <div class="panel-header" style="flex-wrap: wrap; gap: 14px;">
+            <div>
+              <h3 class="panel-title"><span>📈</span> Evolución de Carga y Forma (CTL / ATL / TSB)</h3>
+              <p id="load-chart-subtitle" style="margin: 4px 0 0 0; font-size: 0.82rem; color: var(--text-muted);">
+                Curva continua del modelo de impulso-respuesta: Fitness acumulado (CTL), Fatiga aguda (ATL) y Forma (TSB).
+              </p>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+              <select id="load-chart-athlete-select" class="form-control" style="width: auto; min-width: 210px; padding: 6px 12px; font-size: 0.85rem;">
+                <option value="team_avg">⭐ Media del Equipo (PMC)</option>
+              </select>
+              <div class="btn-group" id="load-chart-metric-buttons" style="display: flex; gap: 4px; background: var(--input-bg); padding: 3px; border-radius: var(--radius-sm); border: 1px solid var(--border-medium); flex-wrap: wrap;">
+                <button type="button" class="btn btn-sm active" data-metric="pmc" id="btn-metric-pmc" style="padding: 4px 10px; font-size: 0.78rem;">📊 PMC Completo (CTL + ATL + TSB)</button>
+                <button type="button" class="btn btn-sm btn-secondary" data-metric="ctl" id="btn-metric-ctl" style="padding: 4px 10px; font-size: 0.78rem;">📈 CTL (Fitness)</button>
+                <button type="button" class="btn btn-sm btn-secondary" data-metric="atl" id="btn-metric-atl" style="padding: 4px 10px; font-size: 0.78rem;">📉 ATL (Fatiga)</button>
+                <button type="button" class="btn btn-sm btn-secondary" data-metric="tsb" id="btn-metric-tsb" style="padding: 4px 10px; font-size: 0.78rem;">⚖️ TSB (Forma)</button>
+                <button type="button" class="btn btn-sm btn-secondary" data-metric="both" id="btn-metric-both" style="padding: 4px 10px; font-size: 0.78rem;">⚡ CTL + ATL</button>
+              </div>
+            </div>
+          </div>
+          <div style="height: 400px; position: relative;">
+            <canvas id="chart-load-evolution"></canvas>
+          </div>
+        </div>
+
         <!-- Tabla de Carga y Bienestar -->
         <div class="panel">
           <div class="panel-header">
-            <h3 class="panel-title"><span>🔋</span> Métricas de Carga (CTL / ATL / TSB) y Forma Física</h3>
+            <h3 class="panel-title"><span>🔋</span> Métricas Actuales de Carga (CTL / ATL / TSB) y Forma Física</h3>
           </div>
           <div class="table-responsive">
             <table class="data-table" id="table-load-report">
@@ -499,6 +574,44 @@
               </thead>
               <tbody id="tbody-races-admin">
                 <!-- Se llena dinámicamente -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           PESTAÑA 6: GESTIÓN DE USUARIOS Y CONTROL DE ACCESO (ADMIN)
+           =================================================================== -->
+      <section id="tab-users" class="tab-view admin-only-section">
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title"><span>🔐</span> Directorio de Usuarios y Roles de Acceso</h2>
+              <p style="font-size: 0.84rem; color: var(--text-muted); margin: 4px 0 0 0;">
+                Administración de credenciales con contraseña y asignación de perfiles (Administrador, Editor, Visor).
+              </p>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-open-create-user-modal">
+              <span>➕</span> Dar de Alta Usuario
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table" id="table-users-admin">
+              <thead>
+                <tr>
+                  <th>Usuario</th>
+                  <th>Nombre Completo</th>
+                  <th>Perfil / Rol</th>
+                  <th>Estado</th>
+                  <th>Fecha Alta</th>
+                  <th>Último Acceso</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-users-admin">
+                <tr><td colspan="7" style="text-align: center; color: var(--text-dim);">Cargando usuarios...</td></tr>
               </tbody>
             </table>
           </div>
@@ -894,11 +1007,139 @@
   </div>
 </div>
 
+<!-- ===================================================================
+     MODAL: CREAR NUEVO USUARIO
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-user-form">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h3 class="panel-title"><span>➕</span> Dar de Alta Nuevo Usuario</h3>
+        <p style="font-size: 0.84rem; color: var(--text-muted); margin: 2px 0 0 0;">
+          Crea credenciales con contraseña y asigna el perfil de acceso a la plataforma.
+        </p>
+      </div>
+      <button class="modal-close" id="btn-close-uf-modal">&times;</button>
+    </div>
+    <form id="form-create-user">
+      <div class="form-group">
+        <label class="form-label">Nombre de Usuario (Login)</label>
+        <input type="text" id="form-uf-username" class="form-control" required placeholder="ej. ds_martin" minlength="3">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Nombre Completo / Cargo</label>
+        <input type="text" id="form-uf-nombre" class="form-control" placeholder="ej. Martín Santos (Director Deportivo)">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Perfil / Rol de Acceso</label>
+        <select id="form-uf-rol" class="form-control" required>
+          <option value="visor">👁️ Visor (Solo Lectura - Consulta de métricas)</option>
+          <option value="editor" selected>✏️ Editor (Gestión de ciclistas, carreras e informes)</option>
+          <option value="administrador">👑 Administrador (Control Total del sistema y usuarios)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Contraseña de Acceso</label>
+        <input type="password" id="form-uf-password" class="form-control" required placeholder="Mínimo 4 caracteres" minlength="4">
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-uf-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="btn-submit-uf">Crear Usuario</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===================================================================
+     MODAL: EDITAR ROL Y ESTADO DE USUARIO
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-user-edit">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h3 class="panel-title"><span>✏️</span> Editar Usuario</h3>
+        <p id="modal-ue-subtitle" style="font-size: 0.84rem; color: var(--text-muted); margin: 2px 0 0 0;">
+          Modifica el perfil de acceso o estado de la cuenta.
+        </p>
+      </div>
+      <button class="modal-close" id="btn-close-ue-modal">&times;</button>
+    </div>
+    <form id="form-edit-user">
+      <input type="hidden" id="form-ue-username" value="">
+
+      <div class="form-group">
+        <label class="form-label">Nombre Completo</label>
+        <input type="text" id="form-ue-nombre" class="form-control" placeholder="Nombre completo">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Perfil / Rol</label>
+        <select id="form-ue-rol" class="form-control" required>
+          <option value="visor">👁️ Visor (Solo Lectura)</option>
+          <option value="editor">✏️ Editor (Gestión de Datos)</option>
+          <option value="administrador">👑 Administrador (Control Total)</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="display: flex; align-items: center; gap: 10px; margin-top: 14px;">
+        <input type="checkbox" id="form-ue-activo" style="width: 18px; height: 18px; cursor: pointer;">
+        <label for="form-ue-activo" style="font-size: 0.9rem; font-weight: 500; cursor: pointer; margin: 0;">
+          Cuenta Activa (Habilitada para iniciar sesión)
+        </label>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-ue-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="btn-submit-ue">Guardar Cambios</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===================================================================
+     MODAL: CAMBIAR CONTRASEÑA DE USUARIO
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-user-password">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h3 class="panel-title"><span>🔑</span> Cambiar Contraseña</h3>
+        <p id="modal-up-subtitle" style="font-size: 0.84rem; color: var(--text-muted); margin: 2px 0 0 0;">
+          Asigna una nueva contraseña segura para el usuario.
+        </p>
+      </div>
+      <button class="modal-close" id="btn-close-up-modal">&times;</button>
+    </div>
+    <form id="form-change-password">
+      <input type="hidden" id="form-up-username" value="">
+
+      <div class="form-group">
+        <label class="form-label">Nueva Contraseña</label>
+        <input type="password" id="form-up-new-pwd" class="form-control" required placeholder="Mínimo 4 caracteres" minlength="4">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Confirmar Nueva Contraseña</label>
+        <input type="password" id="form-up-confirm-pwd" class="form-control" required placeholder="Repite la contraseña" minlength="4">
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-up-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="btn-submit-up">Actualizar Contraseña</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- CONTENEDOR DE TOAST NOTIFICATIONS -->
 <div id="toast-container"></div>
 
 <!-- SCRIPTS DE LA APLICACIÓN -->
-<script src="/static/js/app.js"></script>
+<script src="/static/js/app.js?v=2.2"></script>
 
 </body>
 </html>

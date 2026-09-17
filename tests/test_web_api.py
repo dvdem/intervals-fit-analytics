@@ -21,6 +21,12 @@ class TestWebAPI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+        # Iniciar sesión como administrador por defecto
+        login_resp = cls.client.post("/api/auth/login", json={
+            "username": "admin",
+            "password": "#siemprevalientes"
+        })
+        assert login_resp.status_code == 200, f"Error en login: {login_resp.text}"
 
     def test_root_html(self):
         """Verifica que la página principal SPA cargue correctamente."""
@@ -174,6 +180,25 @@ class TestWebAPI(unittest.TestCase):
             first_metric = data["metrics_table"][0]
             self.assertEqual(first_metric["athlete_name"], "Test Rider")
             self.assertEqual(first_metric["ctl"], 85.0)
+
+            # Validar serie temporal de carga para gráfico CTL/ATL/TSB
+            self.assertIn("load_timeseries", data)
+            self.assertGreater(len(data["load_timeseries"]), 0)
+            team_ts = next((ts for ts in data["load_timeseries"] if ts.get("is_team_avg")), None)
+            self.assertIsNotNone(team_ts)
+            rider_ts = next((ts for ts in data["load_timeseries"] if ts["athlete_name"] == "Test Rider"), None)
+            self.assertIsNotNone(rider_ts)
+            self.assertEqual(rider_ts["series"][0]["ctl"], 85.0)
+            self.assertEqual(rider_ts["series"][0]["atl"], 90.0)
+            self.assertEqual(rider_ts["series"][0]["tsb"], -5.0)
+
+            # Validar comparativa con mejor registro histórico (PR)
+            self.assertIn("duraciones", first_peak)
+            self.assertIn("5s", first_peak["duraciones"])
+            self.assertEqual(first_peak["duraciones"]["5s"]["peak_watts"], 1000)
+            self.assertEqual(first_peak["duraciones"]["5s"]["all_time_watts"], 1100)
+            self.assertAlmostEqual(first_peak["duraciones"]["5s"]["pct_pr"], 90.9, places=1)
+            self.assertFalse(first_peak["duraciones"]["5s"]["es_pr"])
 
     def test_power_report_export_endpoint(self):
         """Verifica que el endpoint /api/power-report/export genere el enlace de descarga."""

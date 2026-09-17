@@ -44,9 +44,16 @@ def _cargar_o_renderizar_svg(svg_path: Union[str, Path]) -> Optional[np.ndarray]
 
     import subprocess
     import os
+    import shutil
     from PIL import Image
 
     browser_binaries = [
+        # Linux / PATH
+        shutil.which('google-chrome'),
+        shutil.which('google-chrome-stable'),
+        shutil.which('chromium-browser'),
+        shutil.which('chromium'),
+        # Windows
         r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
         r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
         r'C:\Program Files\Google\Chrome\Application\chrome.exe',
@@ -55,7 +62,7 @@ def _cargar_o_renderizar_svg(svg_path: Union[str, Path]) -> Optional[np.ndarray]
 
     selected_browser = None
     for b in browser_binaries:
-        if os.path.exists(b):
+        if b and os.path.exists(b):
             selected_browser = b
             break
 

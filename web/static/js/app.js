@@ -5,11 +5,18 @@
 
 // Estado global de la aplicación
 const AppState = {
+  currentUser: null,
   athletes: [],
   currentTab: 'tab-dashboard',
   racesCalendar: [],
   raceFilter: 'all',
   peaksChart: null,
+  loadEvolutionChart: null,
+  loadTimeseriesData: [],
+  peaksTableData: [],
+  peaksTableView: 'compact',
+  loadChartMetric: 'pmc',
+  loadChartAthlete: 'team_avg',
   mmpChart: null,
   raceHistoryChart: null,
   cachedRaceHistoryStages: [],
@@ -84,7 +91,7 @@ function updateChartsTheme() {
   const textColor = getChartTextColor();
   const gridColor = getChartGridColor();
 
-  [AppState.peaksChart, AppState.mmpChart, AppState.raceHistoryChart].forEach(chart => {
+  [AppState.peaksChart, AppState.loadEvolutionChart, AppState.mmpChart, AppState.raceHistoryChart].forEach(chart => {
     if (!chart) return;
     if (chart.options.scales) {
       Object.values(chart.options.scales).forEach(scale => {
@@ -125,7 +132,8 @@ function navigateToTab(tabId) {
     'tab-stage': 'Análisis de Etapa y Perfil Interactivo',
     'tab-reports': 'Informes de Rendimiento y Potencias',
     'tab-records': 'Mejores Números y Fatiga Previa (kJ)',
-    'tab-admin': 'Gestión de Ciclistas y Carreras'
+    'tab-admin': 'Gestión de Ciclistas y Carreras',
+    'tab-users': 'Gestión de Usuarios y Roles de Acceso'
   };
   document.getElementById('page-title').textContent = titles[tabId] || 'Intervals Fit Analytics';
 
@@ -137,6 +145,9 @@ function navigateToTab(tabId) {
   if (tabId === 'tab-admin') {
     loadAthletesAdmin();
     loadRacesAdmin();
+  }
+  if (tabId === 'tab-users') {
+    loadUsersAdminTable();
   }
 }
 
@@ -172,6 +183,37 @@ function getCountryFlag(pais) {
 function escapeJs(str) {
   if (!str) return '';
   return String(str).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function getAthleteDisplayName(athleteOrId) {
+  if (!athleteOrId) return 'Ciclista';
+  if (typeof athleteOrId === 'string') {
+    const id = athleteOrId.trim();
+    const found = (AppState.athletes || []).find(a => a.intervals_id === id || a.atleta_id === id);
+    return (found && (found.name || found.nombre)) ? (found.name || found.nombre) : id;
+  }
+  const directName = athleteOrId.name || athleteOrId.nombre || athleteOrId.atleta_nombre;
+  if (directName && directName !== athleteOrId.atleta_id && !/^i\d+$/i.test(directName)) {
+    return directName;
+  }
+  const id = athleteOrId.atleta_id || athleteOrId.intervals_id;
+  if (id) {
+    const found = (AppState.athletes || []).find(a => a.intervals_id === id || a.atleta_id === id);
+    if (found && (found.name || found.nombre)) {
+      return found.name || found.nombre;
+    }
+  }
+  return directName || athleteOrId.atleta_id || athleteOrId.intervals_id || 'Ciclista';
 }
 
 async function loadDashboardData() {
@@ -270,15 +312,21 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
 
       const convocados = c.convocados || [];
       const convocadosListHtml = convocados.length > 0
-        ? convocados.map(a => `
+        ? convocados.map(a => {
+            const displayName = getAthleteDisplayName(a);
+            const badgeMeta = a.rol || (a.dorsal ? `Dorsal #${a.dorsal}` : 'Convocado');
+            const weightVal = a.weight || a.peso || 70;
+            const ftpVal = a.ftp || 380;
+            return `
             <li class="race-roster-item">
               <div>
-                <strong>${a.name || a.atleta_id}</strong>
-                <span style="font-size: 0.8rem; color: var(--text-dim);">(${a.weight || 70} kg, ${a.ftp || 380} W)</span>
+                <strong>${escapeHtml(displayName)}</strong>
+                <span style="font-size: 0.8rem; color: var(--text-dim);">(${weightVal} kg, ${ftpVal} W)</span>
               </div>
-              <span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${a.atleta_id}</span>
+              <span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(badgeMeta)}</span>
             </li>
-          `).join('')
+          `;
+          }).join('')
         : `<li style="color: var(--text-dim); padding: 8px 0;">Sin ciclistas convocados a esta carrera.</li>`;
 
       return `
@@ -363,7 +411,7 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
       : proximaCarrera.fecha_inicio;
     const convocados = proximaCarrera.convocados || [];
     const convocadosTags = convocados.length > 0
-      ? convocados.map(a => `<span class="convocado-tag">${a.name || a.atleta_id}</span>`).join('')
+      ? convocados.map(a => `<span class="convocado-tag">${escapeHtml(getAthleteDisplayName(a))}</span>`).join('')
       : '<span style="color: var(--text-dim); font-size: 0.82rem;">Pendiente de asignar convocatoria</span>';
 
     cardsHtml += `
@@ -508,15 +556,17 @@ function renderRaceGroups(grupos) {
     const athletes = g.atletas || [];
     const athletesListHtml = athletes.length > 0
       ? athletes.map(a => {
+          const displayName = getAthleteDisplayName(a);
+          const badgeMeta = a.rol || (a.dorsal ? `#${a.dorsal}` : 'Corredor');
           const lastStageInfo = a.ultima_etapa_km ? ` · <span style="color: var(--accent-cyan); font-size: 0.78rem;">Últ: ${a.ultima_etapa_km} km (${(a.ultima_etapa_kj || 0).toLocaleString()} kJ)</span>` : '';
           return `
             <li class="race-roster-item">
               <div>
-                <strong>${a.name}</strong>
-                <span style="font-size: 0.8rem; color: var(--text-dim);">(${a.weight} kg, ${a.ftp} W)</span>
+                <strong>${escapeHtml(displayName)}</strong>
+                <span style="font-size: 0.8rem; color: var(--text-dim);">(${a.weight || 70} kg, ${a.ftp || 380} W)</span>
                 ${lastStageInfo}
               </div>
-              <span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${a.intervals_id}</span>
+              <span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(badgeMeta)}</span>
             </li>
           `;
         }).join('')
@@ -855,6 +905,208 @@ document.getElementById('btn-run-stage-analysis')?.addEventListener('click', asy
 // MÓDULO 3: POWER & LOAD REPORTS
 // =============================================================================
 
+const SQUAD_COLORS = [
+  '#0284c7', // Sky blue
+  '#059669', // Emerald
+  '#d97706', // Amber
+  '#e11d48', // Rose
+  '#7c3aed', // Purple
+  '#0d9488', // Teal
+  '#ea580c', // Orange
+  '#4f46e5', // Indigo
+  '#db2777', // Pink
+  '#16a34a', // Green
+  '#0891b2', // Cyan
+  '#9333ea', // Fuchsia
+  '#ca8a04', // Yellow
+  '#64748b'  // Slate
+];
+
+const PEAK_DURATIONS_LIST = [
+  { key: '5s', label: '5s (Sprint)' },
+  { key: '30s', label: '30s (Sprint L.)' },
+  { key: '1m', label: '1m (Anaerób.)' },
+  { key: '5m', label: '5m (VO2máx)' },
+  { key: '10m', label: '10m (Ataque)' },
+  { key: '20m', label: '20m (FTP / Umbral)' }
+];
+
+function renderPeakCell(durData) {
+  if (!durData) return `<span class="mono" style="color: var(--text-dim);">-</span>`;
+
+  const peakW = durData.peak_watts;
+  const peakWkg = durData.peak_wkg;
+  const histW = durData.all_time_watts;
+  const histWkg = durData.all_time_wkg;
+  const pctPr = durData.pct_pr;
+  const esPr = durData.es_pr;
+
+  if (peakW !== null && peakW !== undefined) {
+    let badgeHtml = '';
+    let valClass = 'peak-cell-val';
+
+    if (esPr) {
+      valClass += ' is-pr';
+      badgeHtml = `<span class="badge badge-pr">🏆 PR</span>`;
+    } else if (pctPr !== null && pctPr !== undefined) {
+      if (pctPr >= 95) {
+        badgeHtml = `<span class="badge badge-pr-near">🔥 ${pctPr}%</span>`;
+      } else if (pctPr >= 85) {
+        badgeHtml = `<span class="badge badge-pr-mid">⚡ ${pctPr}%</span>`;
+      } else {
+        badgeHtml = `<span class="badge badge-pr-sub">${pctPr}%</span>`;
+      }
+    }
+
+    const prLabel = (histW && !esPr) ? `<span class="peak-cell-record" title="Récord Histórico PR">PR: ${histW}W (${histWkg ? `${histWkg} W/kg` : '-'})</span>` : '';
+
+    return `
+      <div class="peak-cell">
+        <div class="peak-cell-main">
+          <span class="${valClass}">${peakW} W</span>
+          <span class="peak-cell-wkg">${peakWkg ? `${peakWkg} W/kg` : ''}</span>
+        </div>
+        <div class="peak-cell-sub">
+          ${prLabel}
+          ${badgeHtml}
+        </div>
+      </div>
+    `;
+  } else if (histW !== null && histW !== undefined) {
+    return `
+      <div class="peak-cell">
+        <div class="peak-cell-main">
+          <span class="peak-cell-val" style="color: var(--text-dim); font-size: 0.85rem;">--</span>
+        </div>
+        <div class="peak-cell-sub">
+          <span class="peak-cell-record" style="color: var(--text-muted);">PR: ${histW} W (${histWkg ? `${histWkg} W/kg` : '-'})</span>
+        </div>
+      </div>
+    `;
+  }
+
+  return `<span class="mono" style="color: var(--text-dim);">-</span>`;
+}
+
+function renderPeaksTable(peaksData) {
+  const thead = document.getElementById('thead-peaks-report');
+  const tbody = document.getElementById('tbody-peaks-report');
+  if (!thead || !tbody) return;
+
+  if (!peaksData || !peaksData.length) {
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-dim);">No se encontraron picos recientes para los ciclistas del grupo.</td></tr>`;
+    return;
+  }
+
+  const isSplit = (AppState.peaksTableView === 'split');
+
+  if (isSplit) {
+    thead.innerHTML = `
+      <tr>
+        <th rowspan="2" style="min-width: 160px; vertical-align: middle;">Ciclista</th>
+        ${PEAK_DURATIONS_LIST.map(d => `<th colspan="2" style="text-align: center; border-left: 1px solid var(--border-medium);">${d.label}</th>`).join('')}
+      </tr>
+      <tr>
+        ${PEAK_DURATIONS_LIST.map(() => `
+          <th style="font-size: 0.72rem; padding: 6px 8px; border-left: 1px solid var(--border-medium);">Reciente</th>
+          <th style="font-size: 0.72rem; padding: 6px 8px;">Récord PR</th>
+        `).join('')}
+      </tr>
+    `;
+
+    tbody.innerHTML = peaksData.map(r => {
+      const durs = r.duraciones || {};
+      const cells = PEAK_DURATIONS_LIST.map(d => {
+        const item = durs[d.key];
+        const peakW = item?.peak_watts;
+        const peakWkg = item?.peak_wkg;
+        const histW = item?.all_time_watts;
+        const histWkg = item?.all_time_wkg;
+        const pctPr = item?.pct_pr;
+        const esPr = item?.es_pr;
+
+        let badge = '';
+        if (esPr) {
+          badge = `<span class="badge badge-pr" style="margin-left: 4px; font-size: 0.68rem;">🏆</span>`;
+        } else if (pctPr >= 95) {
+          badge = `<span class="badge badge-pr-near" style="margin-left: 4px; font-size: 0.68rem;">${pctPr}%</span>`;
+        } else if (pctPr >= 85) {
+          badge = `<span class="badge badge-pr-mid" style="margin-left: 4px; font-size: 0.68rem;">${pctPr}%</span>`;
+        } else if (pctPr) {
+          badge = `<span class="badge badge-pr-sub" style="margin-left: 4px; font-size: 0.68rem;">${pctPr}%</span>`;
+        }
+
+        const recHtml = peakW !== null && peakW !== undefined
+          ? `<span class="mono" style="font-weight: 600;">${peakW} W</span> <span class="mono" style="font-size: 0.78rem; color: var(--accent-cyan);">${peakWkg ? `${peakWkg}` : ''}</span>`
+          : `<span class="mono" style="color: var(--text-dim);">--</span>`;
+
+        const histHtml = histW !== null && histW !== undefined
+          ? `<span class="mono" style="color: var(--text-muted);">${histW} W</span> <span class="mono" style="font-size: 0.76rem; color: var(--text-dim);">${histWkg ? `(${histWkg})` : ''}</span> ${badge}`
+          : `<span class="mono" style="color: var(--text-dim);">-</span>`;
+
+        return `
+          <td style="border-left: 1px solid var(--border-subtle); padding: 10px 8px;">${recHtml}</td>
+          <td style="padding: 10px 8px;">${histHtml}</td>
+        `;
+      }).join('');
+
+      return `
+        <tr>
+          <td><strong style="color: var(--text-bright);">${r['Ciclista'] || r['Name'] || 'Atleta'}</strong></td>
+          ${cells}
+        </tr>
+      `;
+    }).join('');
+
+  } else {
+    thead.innerHTML = `
+      <tr>
+        <th style="min-width: 160px;">Ciclista</th>
+        ${PEAK_DURATIONS_LIST.map(d => `<th>${d.label}</th>`).join('')}
+      </tr>
+    `;
+
+    tbody.innerHTML = peaksData.map(r => {
+      const durs = r.duraciones || {};
+      return `
+        <tr>
+          <td><strong style="color: var(--text-bright); font-size: 0.92rem;">${r['Ciclista'] || r['Name'] || 'Atleta'}</strong></td>
+          ${PEAK_DURATIONS_LIST.map(d => `<td>${renderPeakCell(durs[d.key])}</td>`).join('')}
+        </tr>
+      `;
+    }).join('');
+  }
+}
+
+function initPeaksTableControls() {
+  const btnCompact = document.getElementById('btn-peaks-view-compact');
+  const btnSplit = document.getElementById('btn-peaks-view-split');
+
+  if (btnCompact && !btnCompact._bound) {
+    btnCompact._bound = true;
+    btnCompact.addEventListener('click', () => {
+      btnCompact.classList.add('active');
+      btnCompact.classList.remove('btn-secondary');
+      btnSplit?.classList.remove('active');
+      btnSplit?.classList.add('btn-secondary');
+      AppState.peaksTableView = 'compact';
+      renderPeaksTable(AppState.peaksTableData);
+    });
+  }
+
+  if (btnSplit && !btnSplit._bound) {
+    btnSplit._bound = true;
+    btnSplit.addEventListener('click', () => {
+      btnSplit.classList.add('active');
+      btnSplit.classList.remove('btn-secondary');
+      btnCompact?.classList.remove('active');
+      btnCompact?.classList.add('btn-secondary');
+      AppState.peaksTableView = 'split';
+      renderPeaksTable(AppState.peaksTableData);
+    });
+  }
+}
+
 async function loadPowerReport() {
   const grupoVal = document.getElementById('report-select-group')?.value;
   const dias = document.getElementById('report-select-days-peaks')?.value || 30;
@@ -862,7 +1114,7 @@ async function loadPowerReport() {
 
   const tbodyPeaks = document.getElementById('tbody-peaks-report');
   const tbodyLoad = document.getElementById('tbody-load-report');
-  if (tbodyPeaks) tbodyPeaks.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-dim);">Consultando picos en Intervals.icu...</td></tr>`;
+  if (tbodyPeaks) tbodyPeaks.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-dim);">Consultando picos y evolución en Intervals.icu...</td></tr>`;
 
   try {
     let url = `/api/power-report/data?dias=${dias}&dias_carga=${diasCarga}`;
@@ -878,28 +1130,21 @@ async function loadPowerReport() {
     if (!res.ok) throw new Error('Error al obtener datos del informe');
     const data = await res.json();
 
-    // 1. Tabla de Picos
-    if (data.peaks_table && data.peaks_table.length > 0) {
-      tbodyPeaks.innerHTML = data.peaks_table.map(r => `
-        <tr>
-          <td><strong>${r['Ciclista'] || r['Name'] || 'Atleta'}</strong></td>
-          <td class="mono">${r['5s (W)'] || '-'}</td>
-          <td class="mono" style="color: var(--accent-cyan);">${r['5s (W/kg)'] || '-'}</td>
-          <td class="mono">${r['1m (W)'] || '-'}</td>
-          <td class="mono" style="color: var(--accent-cyan);">${r['1m (W/kg)'] || '-'}</td>
-          <td class="mono">${r['5m (W)'] || '-'}</td>
-          <td class="mono" style="color: var(--accent-cyan);">${r['5m (W/kg)'] || '-'}</td>
-          <td class="mono">${r['20m (W)'] || '-'}</td>
-          <td class="mono" style="color: var(--accent-cyan);">${r['20m (W/kg)'] || '-'}</td>
-        </tr>
-      `).join('');
+    // 1. Tabla de Picos comparada con Récord Histórico PR (6 duraciones)
+    AppState.peaksTableData = data.peaks_table || [];
+    initPeaksTableControls();
+    renderPeaksTable(AppState.peaksTableData);
 
+    if (data.peaks_table && data.peaks_table.length > 0) {
       renderPeaksChart(data.peaks_table);
-    } else {
-      tbodyPeaks.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-dim);">No se encontraron picos recientes para los ciclistas del grupo.</td></tr>`;
     }
 
-    // 2. Tabla de Carga
+    // 2. Gráfico de Evolución de Carga (CTL / ATL / TSB)
+    AppState.loadTimeseriesData = data.load_timeseries || [];
+    initLoadChartControls(data.load_timeseries || []);
+    renderLoadEvolutionChart();
+
+    // 3. Tabla de Carga y Bienestar
     if (data.metrics_table && data.metrics_table.length > 0) {
       tbodyLoad.innerHTML = data.metrics_table.map(r => `
         <tr>
@@ -923,6 +1168,47 @@ async function loadPowerReport() {
 
 document.getElementById('btn-load-power-report')?.addEventListener('click', loadPowerReport);
 
+function initLoadChartControls(timeseries) {
+  const selectAthlete = document.getElementById('load-chart-athlete-select');
+  if (selectAthlete) {
+    const currentSelected = AppState.loadChartAthlete || 'team_avg';
+    const realAthletes = timeseries.filter(a => !a.is_team_avg);
+
+    selectAthlete.innerHTML = `
+      <option value="team_avg" ${currentSelected === 'team_avg' ? 'selected' : ''}>⭐ Media del Equipo (PMC)</option>
+      <option value="__all__" ${currentSelected === '__all__' ? 'selected' : ''}>👥 Comparativa (Todos los Ciclistas)</option>
+      ${realAthletes.map(a => `<option value="${a.athlete_name}" ${a.athlete_name === currentSelected ? 'selected' : ''}>👤 ${a.athlete_name}</option>`).join('')}
+    `;
+  }
+
+  // Listener para el selector de corredor
+  if (selectAthlete && !selectAthlete._bound) {
+    selectAthlete._bound = true;
+    selectAthlete.addEventListener('change', (e) => {
+      AppState.loadChartAthlete = e.target.value;
+      renderLoadEvolutionChart();
+    });
+  }
+
+  // Listeners para los botones de métrica (PMC / CTL / ATL / TSB / BOTH)
+  const metricButtons = document.querySelectorAll('#load-chart-metric-buttons button');
+  metricButtons.forEach(btn => {
+    if (!btn._bound) {
+      btn._bound = true;
+      btn.addEventListener('click', () => {
+        metricButtons.forEach(b => {
+          b.classList.remove('active');
+          b.classList.add('btn-secondary');
+        });
+        btn.classList.add('active');
+        btn.classList.remove('btn-secondary');
+        AppState.loadChartMetric = btn.getAttribute('data-metric') || 'pmc';
+        renderLoadEvolutionChart();
+      });
+    }
+  });
+}
+
 function renderPeaksChart(peaksData) {
   const ctx = document.getElementById('chart-peaks-comparison');
   if (!ctx) return;
@@ -932,8 +1218,10 @@ function renderPeaksChart(peaksData) {
   }
 
   const labels = peaksData.map(d => d['Ciclista'] || d['Name'] || 'Atleta');
-  const data5m = peaksData.map(d => parseFloat(d['5m (W/kg)']) || 0);
-  const data20m = peaksData.map(d => parseFloat(d['20m (W/kg)']) || 0);
+  const data5mReciente = peaksData.map(d => (d.duraciones && d.duraciones['5m']) ? (d.duraciones['5m'].peak_wkg || 0) : (parseFloat(d['5m (W/kg)']) || 0));
+  const data5mRecord = peaksData.map(d => (d.duraciones && d.duraciones['5m']) ? (d.duraciones['5m'].all_time_wkg || 0) : (parseFloat(d['5m PR (W/kg)']) || 0));
+  const data20mReciente = peaksData.map(d => (d.duraciones && d.duraciones['20m']) ? (d.duraciones['20m'].peak_wkg || 0) : (parseFloat(d['20m (W/kg)']) || 0));
+  const data20mRecord = peaksData.map(d => (d.duraciones && d.duraciones['20m']) ? (d.duraciones['20m'].all_time_wkg || 0) : (parseFloat(d['20m PR (W/kg)']) || 0));
 
   const textColor = getChartTextColor();
   const gridColor = getChartGridColor();
@@ -944,20 +1232,38 @@ function renderPeaksChart(peaksData) {
       labels: labels,
       datasets: [
         {
-          label: '5m (W/kg) - VO2máx',
-          data: data5m,
-          backgroundColor: 'rgba(2, 132, 199, 0.75)',
+          label: '5m Reciente (W/kg)',
+          data: data5mReciente,
+          backgroundColor: 'rgba(2, 132, 199, 0.85)',
           borderColor: '#0284c7',
           borderWidth: 1,
-          borderRadius: 6
+          borderRadius: 5
         },
         {
-          label: '20m (W/kg) - Umbral / FTP',
-          data: data20m,
-          backgroundColor: 'rgba(5, 150, 105, 0.75)',
+          label: '5m Récord PR (W/kg)',
+          data: data5mRecord,
+          backgroundColor: 'rgba(217, 119, 6, 0.35)',
+          borderColor: '#d97706',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          borderRadius: 5
+        },
+        {
+          label: '20m Reciente (W/kg)',
+          data: data20mReciente,
+          backgroundColor: 'rgba(5, 150, 105, 0.85)',
           borderColor: '#059669',
           borderWidth: 1,
-          borderRadius: 6
+          borderRadius: 5
+        },
+        {
+          label: '20m Récord PR (W/kg)',
+          data: data20mRecord,
+          backgroundColor: 'rgba(16, 185, 129, 0.35)',
+          borderColor: '#10b981',
+          borderWidth: 1.5,
+          borderDash: [4, 4],
+          borderRadius: 5
         }
       ]
     },
@@ -965,7 +1271,14 @@ function renderPeaksChart(peaksData) {
       responsive: true,
       maintainAspectRatio: false,
       plugins: {
-        legend: { labels: { color: textColor } }
+        legend: { labels: { color: textColor, boxWidth: 12 } },
+        tooltip: {
+          callbacks: {
+            label: function(ctx) {
+              return ` ${ctx.dataset.label}: ${ctx.raw} W/kg`;
+            }
+          }
+        }
       },
       scales: {
         x: { ticks: { color: textColor }, grid: { color: gridColor } },
@@ -973,11 +1286,289 @@ function renderPeaksChart(peaksData) {
           title: { display: true, text: 'W/kg', color: textColor },
           ticks: { color: textColor }, 
           grid: { color: gridColor },
-          suggestedMin: 3.5
+          suggestedMin: 3.0
         }
       }
     }
   });
+}
+
+function renderLoadEvolutionChart() {
+  const ctx = document.getElementById('chart-load-evolution');
+  if (!ctx) return;
+
+  if (AppState.loadEvolutionChart) {
+    AppState.loadEvolutionChart.destroy();
+    AppState.loadEvolutionChart = null;
+  }
+
+  const timeseries = AppState.loadTimeseriesData || [];
+  if (!timeseries.length) {
+    return;
+  }
+
+  const textColor = getChartTextColor();
+  const gridColor = getChartGridColor();
+  const selectedAthlete = AppState.loadChartAthlete || 'team_avg';
+  const selectedMetric = AppState.loadChartMetric || 'pmc';
+
+  // Extraer lista ordenada de fechas únicas
+  const allDatesSet = new Set();
+  timeseries.forEach(ath => {
+    (ath.series || []).forEach(pt => {
+      if (pt.fecha) allDatesSet.add(pt.fecha);
+    });
+  });
+  const labels = Array.from(allDatesSet).sort();
+
+  const formatTickDate = function(val, index) {
+    const s = String(labels[index] ?? labels[val] ?? '');
+    return s.length >= 10 ? s.slice(5) : s;
+  };
+
+  const subtitle = document.getElementById('load-chart-subtitle');
+
+  if (selectedMetric === 'pmc' || (selectedAthlete !== '__all__' && selectedMetric === 'both')) {
+    // MODO PMC COMPLETO: CTL (Fitness) + ATL (Fatiga) + TSB (Forma) + TSS diario
+    let targetSeries = null;
+    let targetName = '';
+
+    if (selectedAthlete === 'team_avg') {
+      targetSeries = timeseries.find(a => a.is_team_avg) || timeseries[0];
+      targetName = 'Media del Equipo';
+    } else if (selectedAthlete === '__all__') {
+      targetSeries = timeseries.find(a => a.is_team_avg) || timeseries[0];
+      targetName = 'Media del Equipo';
+    } else {
+      targetSeries = timeseries.find(a => a.athlete_name === selectedAthlete);
+      targetName = selectedAthlete;
+    }
+
+    if (!targetSeries) return;
+
+    const dateMap = {};
+    (targetSeries.series || []).forEach(pt => {
+      dateMap[pt.fecha] = pt;
+    });
+
+    const dataCtl = labels.map(d => dateMap[d]?.ctl ?? null);
+    const dataAtl = labels.map(d => dateMap[d]?.atl ?? null);
+    const dataTsb = labels.map(d => dateMap[d]?.tsb ?? null);
+    const dataTss = labels.map(d => dateMap[d]?.daily_load ?? 0);
+
+    const lastPt = (targetSeries.series && targetSeries.series.length) ? targetSeries.series[targetSeries.series.length - 1] : {};
+    if (subtitle) {
+      subtitle.innerHTML = `<strong>${targetName}</strong> — CTL (Fitness): <span style="color: var(--accent-cyan); font-weight:700;">${lastPt.ctl ?? '-'}</span> | ATL (Fatiga): <span style="color: var(--accent-rose); font-weight:700;">${lastPt.atl ?? '-'}</span> | TSB (Forma): <span style="color: ${parseFloat(lastPt.tsb) >= 0 ? 'var(--accent-emerald)' : 'var(--accent-amber)'}; font-weight:700;">${lastPt.tsb ?? '-'}</span>`;
+    }
+
+    AppState.loadEvolutionChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            type: 'bar',
+            label: 'TSS Diario (Carga)',
+            data: dataTss,
+            backgroundColor: 'rgba(148, 163, 184, 0.25)',
+            borderColor: 'rgba(148, 163, 184, 0.4)',
+            borderWidth: 1,
+            borderRadius: 3,
+            yAxisID: 'yTss',
+            order: 4
+          },
+          {
+            type: 'line',
+            label: 'CTL (Fitness acumulado)',
+            data: dataCtl,
+            borderColor: '#0284c7',
+            backgroundColor: 'rgba(2, 132, 199, 0.08)',
+            borderWidth: 3.0,
+            pointRadius: 1.5,
+            pointHoverRadius: 6,
+            tension: 0.25,
+            yAxisID: 'yPmc',
+            order: 1,
+            spanGaps: true
+          },
+          {
+            type: 'line',
+            label: 'ATL (Fatiga aguda)',
+            data: dataAtl,
+            borderColor: '#f43f5e',
+            borderWidth: 2.4,
+            borderDash: [5, 3],
+            pointRadius: 1.5,
+            pointHoverRadius: 6,
+            tension: 0.25,
+            yAxisID: 'yPmc',
+            order: 2,
+            spanGaps: true
+          },
+          {
+            type: 'line',
+            label: 'TSB (Forma / Balance)',
+            data: dataTsb,
+            borderColor: '#10b981',
+            borderWidth: 2.0,
+            pointRadius: 1.5,
+            pointHoverRadius: 6,
+            tension: 0.25,
+            yAxisID: 'yPmc',
+            order: 3,
+            spanGaps: true
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'top', labels: { color: textColor, boxWidth: 14 } },
+          tooltip: {
+            callbacks: {
+              label: function(c) {
+                const val = c.raw !== null ? c.raw : '-';
+                return ` ${c.dataset.label}: ${val}`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: textColor, maxTicksLimit: 14, callback: formatTickDate },
+            grid: { color: gridColor }
+          },
+          yPmc: {
+            position: 'left',
+            title: { display: true, text: 'CTL / ATL / TSB', color: textColor },
+            ticks: { color: textColor },
+            grid: { color: gridColor }
+          },
+          yTss: {
+            position: 'right',
+            title: { display: true, text: 'TSS', color: textColor },
+            ticks: { color: textColor },
+            grid: { display: false },
+            suggestedMax: 200,
+            min: 0
+          }
+        }
+      }
+    });
+
+  } else if (selectedMetric === 'both') {
+    // MODO SIMULTÁNEO: CTL (línea continua) y ATL (línea discontinua) para todos los ciclistas
+    const realAthletes = timeseries.filter(a => !a.is_team_avg);
+    const datasets = [];
+
+    realAthletes.forEach((ath, idx) => {
+      const color = SQUAD_COLORS[idx % SQUAD_COLORS.length];
+      const dateMap = {};
+      (ath.series || []).forEach(pt => { dateMap[pt.fecha] = pt; });
+
+      datasets.push({
+        label: `${ath.athlete_name} (CTL)`,
+        data: labels.map(d => dateMap[d]?.ctl ?? null),
+        borderColor: color,
+        backgroundColor: color,
+        fill: false,
+        tension: 0.25,
+        borderWidth: 2.4,
+        pointRadius: 1.5,
+        pointHoverRadius: 5,
+        spanGaps: true
+      });
+
+      datasets.push({
+        label: `${ath.athlete_name} (ATL)`,
+        data: labels.map(d => dateMap[d]?.atl ?? null),
+        borderColor: color,
+        borderDash: [5, 4],
+        backgroundColor: color,
+        fill: false,
+        tension: 0.25,
+        borderWidth: 1.8,
+        pointRadius: 1,
+        pointHoverRadius: 5,
+        spanGaps: true
+      });
+    });
+
+    if (subtitle) {
+      subtitle.textContent = `Comparativa simultánea de CTL (línea continua) y ATL (línea punteada) de todos los ciclistas.`;
+    }
+
+    AppState.loadEvolutionChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'top', labels: { color: textColor, boxWidth: 12 } },
+          tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${c.raw !== null ? c.raw : '-'}` } }
+        },
+        scales: {
+          x: { ticks: { color: textColor, maxTicksLimit: 14, callback: formatTickDate }, grid: { color: gridColor } },
+          y: { title: { display: true, text: 'Carga (CTL / ATL)', color: textColor }, ticks: { color: textColor }, grid: { color: gridColor } }
+        }
+      }
+    });
+
+  } else {
+    // MODO MÉTRICA ÚNICA: CTL, ATL o TSB entre todos los ciclistas
+    const metricLabels = {
+      ctl: 'CTL (Fitness acumulado)',
+      atl: 'ATL (Fatiga aguda)',
+      tsb: 'TSB (Balance de Forma)'
+    };
+    const metricUnit = metricLabels[selectedMetric] || selectedMetric.toUpperCase();
+    const realAthletes = timeseries.filter(a => !a.is_team_avg);
+
+    const datasets = realAthletes.map((ath, idx) => {
+      const color = SQUAD_COLORS[idx % SQUAD_COLORS.length];
+      const dateMap = {};
+      (ath.series || []).forEach(pt => { dateMap[pt.fecha] = pt[selectedMetric]; });
+
+      return {
+        label: ath.athlete_name,
+        data: labels.map(d => (dateMap[d] !== undefined ? dateMap[d] : null)),
+        borderColor: color,
+        backgroundColor: color,
+        fill: false,
+        tension: 0.25,
+        borderWidth: 2.2,
+        pointRadius: 1.5,
+        pointHoverRadius: 6,
+        spanGaps: true
+      };
+    });
+
+    if (subtitle) {
+      subtitle.textContent = `Comparativa de ${metricUnit} entre los ciclistas convocados.`;
+    }
+
+    AppState.loadEvolutionChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { position: 'top', labels: { color: textColor, boxWidth: 12 } },
+          tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${c.raw !== null ? c.raw : '-'}` } }
+        },
+        scales: {
+          x: { ticks: { color: textColor, maxTicksLimit: 14, callback: formatTickDate }, grid: { color: gridColor } },
+          y: { title: { display: true, text: metricUnit, color: textColor }, ticks: { color: textColor }, grid: { color: gridColor } }
+        }
+      }
+    });
+  }
 }
 
 // Exportación en 1 clic PDF y Word
@@ -1255,10 +1846,14 @@ async function loadAthletesAdmin() {
     const athletes = await res.json();
     AppState.athletes = athletes;
 
+    const role = AppState.currentUser ? AppState.currentUser.rol : 'visor';
+    const isVisor = role === 'visor';
+    const isAdmin = role === 'administrador';
+
     tbody.innerHTML = athletes.map(a => `
       <tr>
-        <td><strong>${a.name}</strong></td>
-        <td class="mono">${a.intervals_id}</td>
+        <td><strong>${escapeHtml(a.name)}</strong></td>
+        <td class="mono">${escapeHtml(a.intervals_id)}</td>
         <td class="mono">${a.weight} kg</td>
         <td class="mono">${a.ftp} W</td>
         <td class="mono">${a.biela} mm</td>
@@ -1268,8 +1863,10 @@ async function loadAthletesAdmin() {
           </span>
         </td>
         <td>
-          <button class="btn btn-secondary btn-sm" onclick="openEditAthleteModal('${a.intervals_id}')">✏️ Editar</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteAthletePrompt('${a.intervals_id}', '${a.name}')">🗑️</button>
+          ${isVisor ? '<span style="font-size: 0.78rem; color: var(--text-dim);">Solo lectura</span>' : `
+            <button class="btn btn-secondary btn-sm" onclick="openEditAthleteModal('${escapeJs(a.intervals_id)}')">✏️ Editar</button>
+            ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="deleteAthletePrompt('${escapeJs(a.intervals_id)}', '${escapeJs(a.name)}')">🗑️</button>` : ''}
+          `}
         </td>
       </tr>
     `).join('');
@@ -1311,6 +1908,10 @@ function renderRacesAdminTable() {
   const tbody = document.getElementById('tbody-races-admin');
   if (!tbody) return;
 
+  const role = AppState.currentUser ? AppState.currentUser.rol : 'visor';
+  const isVisor = role === 'visor';
+  const isAdmin = role === 'administrador';
+
   let races = AppState.racesCalendar || [];
 
   if (AppState.raceFilter && AppState.raceFilter !== 'all') {
@@ -1336,7 +1937,7 @@ function renderRacesAdminTable() {
     if (convocados.length > 0) {
       const visible = convocados.slice(0, 4);
       convocadosHtml = `<div class="convocados-tag-list">` +
-        visible.map(c => `<span class="convocado-tag">${c.name || c.atleta_id}</span>`).join('') +
+        visible.map(c => `<span class="convocado-tag">${escapeHtml(getAthleteDisplayName(c))}</span>`).join('') +
         (convocados.length > 4 ? `<span class="convocado-tag" style="background: var(--bg-hover); color: var(--accent-cyan);">+${convocados.length - 4} más</span>` : '') +
         `</div>`;
     } else {
@@ -1373,18 +1974,24 @@ function renderRacesAdminTable() {
         <td class="mono" style="color: var(--accent-cyan); font-weight: 600;">${totalKj}</td>
         <td>
           <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-            <button class="btn btn-secondary btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="openConvocatoriaModal('${r.carrera_id}')" title="Ajustar convocatoria">
-              <span>👥</span> Convocatoria
-            </button>
+            ${!isVisor ? `
+              <button class="btn btn-secondary btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="openConvocatoriaModal('${r.carrera_id}')" title="Ajustar convocatoria">
+                <span>👥</span> Convocatoria
+              </button>
+            ` : ''}
             <button class="btn btn-secondary btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="openRaceHistoryModal('${r.carrera_id}', '${escapeJs(r.nombre_carrera)}')" title="Ver histórico">
               <span>📊</span> Histórico
             </button>
-            <button class="btn btn-secondary btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="openEditRaceModal('${r.carrera_id}')" title="Editar datos">
-              <span>✏️</span>
-            </button>
-            <button class="btn btn-danger btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="deleteRacePrompt('${r.carrera_id}', '${escapeJs(r.nombre_carrera)}')" title="Eliminar carrera">
-              <span>🗑️</span>
-            </button>
+            ${!isVisor ? `
+              <button class="btn btn-secondary btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="openEditRaceModal('${r.carrera_id}')" title="Editar datos">
+                <span>✏️</span>
+              </button>
+            ` : ''}
+            ${isAdmin ? `
+              <button class="btn btn-danger btn-sm" style="padding: 3px 8px; font-size: 0.78rem;" onclick="deleteRacePrompt('${r.carrera_id}', '${escapeJs(r.nombre_carrera)}')" title="Eliminar carrera">
+                <span>🗑️</span>
+              </button>
+            ` : ''}
           </div>
         </td>
       </tr>
@@ -2115,10 +2722,338 @@ function renderRaceHistoryChart(etapas) {
 }
 
 // =============================================================================
+// MÓDULO 6: AUTENTICACIÓN, SESIONES Y CONTROL DE ACCESO (RBAC)
+// =============================================================================
+
+// Interceptor global para redirección automática a /login si expira la sesión (401)
+const _origFetch = window.fetch;
+window.fetch = async function(...args) {
+  const response = await _origFetch(...args);
+  if (response.status === 401 && !window.location.pathname.startsWith('/login')) {
+    window.location.href = '/login';
+  }
+  return response;
+};
+
+async function initAuthAndUser() {
+  try {
+    const res = await fetch('/api/auth/me');
+    if (!res.ok) {
+      window.location.href = '/login';
+      return false;
+    }
+    const user = await res.json();
+    AppState.currentUser = user;
+
+    updateUserUI(user);
+    applyRoleRestrictions(user.rol);
+    return true;
+  } catch (e) {
+    window.location.href = '/login';
+    return false;
+  }
+}
+
+function updateUserUI(user) {
+  if (!user) return;
+  const unameEl = document.getElementById('topbar-username');
+  const roleEl = document.getElementById('topbar-user-role');
+  const avatarEl = document.getElementById('topbar-user-avatar');
+
+  if (unameEl) unameEl.textContent = user.nombre_completo || user.username;
+  if (roleEl) {
+    if (user.rol === 'administrador') {
+      roleEl.textContent = '👑 Administrador';
+      roleEl.className = 'badge-role badge-role-admin';
+      if (avatarEl) avatarEl.textContent = '👑';
+    } else if (user.rol === 'editor') {
+      roleEl.textContent = '✏️ Editor';
+      roleEl.className = 'badge-role badge-role-editor';
+      if (avatarEl) avatarEl.textContent = '✏️';
+    } else {
+      roleEl.textContent = '👁️ Visor';
+      roleEl.className = 'badge-role badge-role-visor';
+      if (avatarEl) avatarEl.textContent = '👁️';
+    }
+  }
+}
+
+function applyRoleRestrictions(role) {
+  const visorBanner = document.getElementById('visor-notice-banner');
+  const navUsers = document.getElementById('nav-item-users');
+  const btnSync = document.getElementById('btn-sync-api');
+  const btnAddAthlete = document.getElementById('btn-open-add-athlete-modal');
+  const btnCreateRace = document.getElementById('btn-open-create-race-modal');
+  const btnAssignRace = document.getElementById('btn-assign-race');
+
+  if (role === 'administrador') {
+    if (visorBanner) visorBanner.style.display = 'none';
+    if (navUsers) navUsers.style.display = 'block';
+    if (btnSync) btnSync.style.display = 'inline-flex';
+    if (btnAddAthlete) btnAddAthlete.style.display = 'inline-flex';
+    if (btnCreateRace) btnCreateRace.style.display = 'inline-flex';
+    if (btnAssignRace) btnAssignRace.style.display = 'inline-block';
+  } else if (role === 'editor') {
+    if (visorBanner) visorBanner.style.display = 'none';
+    if (navUsers) navUsers.style.display = 'none';
+    if (btnSync) btnSync.style.display = 'none';
+    if (btnAddAthlete) btnAddAthlete.style.display = 'inline-flex';
+    if (btnCreateRace) btnCreateRace.style.display = 'inline-flex';
+    if (btnAssignRace) btnAssignRace.style.display = 'inline-block';
+  } else {
+    // Rol: visor (Solo Lectura)
+    if (visorBanner) visorBanner.style.display = 'flex';
+    if (navUsers) navUsers.style.display = 'none';
+    if (btnSync) btnSync.style.display = 'none';
+    if (btnAddAthlete) btnAddAthlete.style.display = 'none';
+    if (btnCreateRace) btnCreateRace.style.display = 'none';
+    if (btnAssignRace) btnAssignRace.style.display = 'none';
+  }
+}
+
+async function handleLogout() {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch (e) {}
+  localStorage.removeItem('ifa_token');
+  localStorage.removeItem('ifa_user');
+  window.location.href = '/login';
+}
+
+// -----------------------------------------------------------------------------
+// GESTIÓN DE USUARIOS (CRUD PARA ADMINISTRADOR)
+// -----------------------------------------------------------------------------
+
+async function loadUsersAdminTable() {
+  const tbody = document.getElementById('tbody-users-admin');
+  if (!tbody) return;
+
+  try {
+    const res = await fetch('/api/users');
+    if (!res.ok) {
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      throw new Error('Error al consultar usuarios');
+    }
+    const users = await res.json();
+
+    if (users.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 24px;">No hay usuarios registrados.</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = users.map(u => {
+      let roleBadge = '';
+      if (u.rol === 'administrador') {
+        roleBadge = '<span class="badge-role-admin">👑 Administrador</span>';
+      } else if (u.rol === 'editor') {
+        roleBadge = '<span class="badge-role-editor">✏️ Editor</span>';
+      } else {
+        roleBadge = '<span class="badge-role-visor">👁️ Visor</span>';
+      }
+
+      const statusBadge = u.activo
+        ? '<span class="badge-status-active">🟢 Activo</span>'
+        : '<span class="badge-status-inactive">🔴 Inactivo</span>';
+
+      const fechaAlta = u.creado_en ? u.creado_en.split(' ')[0] : '-';
+      const ultimoAcceso = u.ultimo_acceso ? u.ultimo_acceso.replace('T', ' ').slice(0, 16) : 'Nunca';
+
+      const isSelf = AppState.currentUser && AppState.currentUser.username.toLowerCase() === u.username.toLowerCase();
+
+      return `
+        <tr>
+          <td><strong class="mono">${escapeHtml(u.username)}</strong> ${isSelf ? '<span style="font-size: 0.72rem; color: var(--accent-cyan);">(Tú)</span>' : ''}</td>
+          <td>${escapeHtml(u.nombre_completo || '-')}</td>
+          <td>${roleBadge}</td>
+          <td>${statusBadge}</td>
+          <td class="mono" style="font-size: 0.82rem;">${fechaAlta}</td>
+          <td class="mono" style="font-size: 0.82rem; color: var(--text-dim);">${ultimoAcceso}</td>
+          <td>
+            <div class="user-table-actions">
+              <button class="btn btn-secondary btn-sm btn-user-action" onclick="openChangePasswordModal('${escapeJs(u.username)}')" title="Cambiar contraseña">
+                <span>🔑</span> Pass
+              </button>
+              <button class="btn btn-secondary btn-sm btn-user-action" onclick="openEditUserModal('${escapeJs(u.username)}', '${escapeJs(u.nombre_completo || '')}', '${escapeJs(u.rol)}', ${u.activo})" title="Editar usuario">
+                <span>✏️</span> Rol
+              </button>
+              ${!isSelf ? `
+                <button class="btn btn-danger btn-sm btn-user-action" onclick="deleteUserPrompt('${escapeJs(u.username)}')" title="Eliminar usuario">
+                  <span>🗑️</span>
+                </button>
+              ` : ''}
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  } catch (e) {
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--accent-rose); padding: 20px;">Error al cargar la lista de usuarios.</td></tr>';
+  }
+}
+
+function openCreateUserModal() {
+  document.getElementById('form-create-user')?.reset();
+  document.getElementById('modal-user-form')?.classList.add('active');
+}
+
+function closeCreateUserModal() {
+  document.getElementById('modal-user-form')?.classList.remove('active');
+}
+
+async function handleCreateUserSubmit(e) {
+  e.preventDefault();
+  const username = document.getElementById('form-uf-username').value.trim();
+  const nombre = document.getElementById('form-uf-nombre').value.trim();
+  const rol = document.getElementById('form-uf-rol').value;
+  const password = document.getElementById('form-uf-password').value;
+
+  try {
+    const res = await fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username,
+        nombre_completo: nombre,
+        rol,
+        password
+      })
+    });
+
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      showToast(`Usuario '${username}' creado con éxito`, 'success');
+      closeCreateUserModal();
+      loadUsersAdminTable();
+    } else {
+      showToast(data.detail || 'Error al crear el usuario', 'error');
+    }
+  } catch (err) {
+    showToast('Error de conexión al crear usuario', 'error');
+  }
+}
+
+function openEditUserModal(username, nombre, rol, activo) {
+  document.getElementById('form-ue-username').value = username;
+  document.getElementById('form-ue-nombre').value = nombre;
+  document.getElementById('form-ue-rol').value = rol;
+  document.getElementById('form-ue-activo').checked = Boolean(activo);
+  const subEl = document.getElementById('modal-ue-subtitle');
+  if (subEl) subEl.textContent = `Modificando cuenta de usuario: ${username}`;
+  document.getElementById('modal-user-edit')?.classList.add('active');
+}
+
+function closeEditUserModal() {
+  document.getElementById('modal-user-edit')?.classList.remove('active');
+}
+
+async function handleEditUserSubmit(e) {
+  e.preventDefault();
+  const username = document.getElementById('form-ue-username').value;
+  const nombre = document.getElementById('form-ue-nombre').value.trim();
+  const rol = document.getElementById('form-ue-rol').value;
+  const activo = document.getElementById('form-ue-activo').checked;
+
+  try {
+    const res = await fetch(`/api/users/${encodeURIComponent(username)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        nombre_completo: nombre,
+        rol,
+        activo
+      })
+    });
+
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      showToast(`Usuario '${username}' actualizado`, 'success');
+      closeEditUserModal();
+      loadUsersAdminTable();
+      if (AppState.currentUser && AppState.currentUser.username.toLowerCase() === username.toLowerCase()) {
+        AppState.currentUser.rol = rol;
+        AppState.currentUser.nombre_completo = nombre;
+        updateUserUI(AppState.currentUser);
+      }
+    } else {
+      showToast(data.detail || 'Error al actualizar usuario', 'error');
+    }
+  } catch (err) {
+    showToast('Error de conexión al actualizar usuario', 'error');
+  }
+}
+
+function openChangePasswordModal(username) {
+  document.getElementById('form-change-password')?.reset();
+  document.getElementById('form-up-username').value = username;
+  const subEl = document.getElementById('modal-up-subtitle');
+  if (subEl) subEl.textContent = `Asignando nueva contraseña para: ${username}`;
+  document.getElementById('modal-user-password')?.classList.add('active');
+}
+
+function closeChangePasswordModal() {
+  document.getElementById('modal-user-password')?.classList.remove('active');
+}
+
+async function handleChangePasswordSubmit(e) {
+  e.preventDefault();
+  const username = document.getElementById('form-up-username').value;
+  const newPwd = document.getElementById('form-up-new-pwd').value;
+  const confirmPwd = document.getElementById('form-up-confirm-pwd').value;
+
+  if (newPwd !== confirmPwd) {
+    showToast('Las contraseñas ingresadas no coinciden', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/users/${encodeURIComponent(username)}/password`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: newPwd })
+    });
+
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      showToast(`Contraseña actualizada para '${username}'`, 'success');
+      closeChangePasswordModal();
+    } else {
+      showToast(data.detail || 'Error al actualizar contraseña', 'error');
+    }
+  } catch (err) {
+    showToast('Error de conexión al actualizar contraseña', 'error');
+  }
+}
+
+async function deleteUserPrompt(username) {
+  if (!confirm(`¿Estás seguro de que deseas eliminar permanentemente la cuenta del usuario '${username}'?`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/users/${encodeURIComponent(username)}`, {
+      method: 'DELETE'
+    });
+
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      showToast(`Usuario '${username}' eliminado`, 'success');
+      loadUsersAdminTable();
+    } else {
+      showToast(data.detail || 'No se pudo eliminar el usuario', 'error');
+    }
+  } catch (err) {
+    showToast('Error de conexión al eliminar usuario', 'error');
+  }
+}
+
+// =============================================================================
 // INICIALIZACIÓN AL CARGAR LA PÁGINA
 // =============================================================================
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   // Inicializar controlador de tema
   initTheme();
 
@@ -2129,6 +3064,9 @@ document.addEventListener('DOMContentLoaded', () => {
       navigateToTab(tab);
     });
   });
+
+  // Configurar botón de logout
+  document.getElementById('btn-logout')?.addEventListener('click', handleLogout);
 
   // Configurar tabs del modal de histórico de vuelta
   document.querySelectorAll('.modal-tab-btn').forEach(btn => {
@@ -2162,7 +3100,25 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-close-cq-modal')?.addEventListener('click', closeConvocatoriaModal);
   document.getElementById('btn-cancel-cq-modal')?.addEventListener('click', closeConvocatoriaModal);
 
-  // Cargar dashboard por defecto
+  // Botones y formularios para modales de gestión de usuarios
+  document.getElementById('btn-open-create-user-modal')?.addEventListener('click', openCreateUserModal);
+  document.getElementById('btn-close-uf-modal')?.addEventListener('click', closeCreateUserModal);
+  document.getElementById('btn-cancel-uf-modal')?.addEventListener('click', closeCreateUserModal);
+  document.getElementById('form-create-user')?.addEventListener('submit', handleCreateUserSubmit);
+
+  document.getElementById('btn-close-ue-modal')?.addEventListener('click', closeEditUserModal);
+  document.getElementById('btn-cancel-ue-modal')?.addEventListener('click', closeEditUserModal);
+  document.getElementById('form-edit-user')?.addEventListener('submit', handleEditUserSubmit);
+
+  document.getElementById('btn-close-up-modal')?.addEventListener('click', closeChangePasswordModal);
+  document.getElementById('btn-cancel-up-modal')?.addEventListener('click', closeChangePasswordModal);
+  document.getElementById('form-change-password')?.addEventListener('submit', handleChangePasswordSubmit);
+
+  // 1. Verificar autenticación obligatoria y cargar perfil
+  const authOk = await initAuthAndUser();
+  if (!authOk) return;
+
+  // 2. Cargar dashboard inicial
   loadDashboardData();
 });
 

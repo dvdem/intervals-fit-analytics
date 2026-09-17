@@ -5,12 +5,20 @@ Inicia el servidor local FastAPI con Uvicorn y abre automáticamente el navegado
 
 import sys
 import os
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 import subprocess
 from pathlib import Path
 
 # Auto-detección y re-ejecución transparente con el entorno virtual del proyecto (.venv)
 _ROOT_DIR = Path(__file__).resolve().parent
-_VENV_PYTHON = _ROOT_DIR / ".venv" / "Scripts" / "python.exe"
+_VENV_BIN = "Scripts" if sys.platform == "win32" else "bin"
+_PYTHON_EXE = "python.exe" if sys.platform == "win32" else "python"
+_VENV_PYTHON = _ROOT_DIR / ".venv" / _VENV_BIN / _PYTHON_EXE
 if _VENV_PYTHON.exists():
     try:
         if Path(sys.executable).resolve() != _VENV_PYTHON.resolve():

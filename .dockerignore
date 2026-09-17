@@ -1,0 +1,17 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.github
+node_modules
+scratch
+*.zip
+*.exe
+*.bat
+*.ps1
+output/*
+!output/.gitkeep
+logs/*
+!logs/.gitkeep

@@ -22,12 +22,30 @@ _ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks, Request, Depends, status, Response
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import pandas as pd
+
+from src.auth_manager import (
+    init_auth_db,
+    autenticar_usuario,
+    crear_sesion,
+    validar_sesion,
+    cerrar_sesion,
+    listar_usuarios,
+    obtener_usuario,
+    crear_usuario,
+    actualizar_usuario,
+    cambiar_password,
+    eliminar_usuario,
+    ROL_ADMINISTRADOR,
+    ROL_EDITOR,
+    ROL_VISOR,
+    ROLES_VALIDOS
+)
 
 from config import (
     cargar_roster,
@@ -117,6 +135,28 @@ _SYNC_STATUS = {"running": False, "message": "Inactivo", "last_run": None}
 # =============================================================================
 # Modelos de Datos Pydantic
 # =============================================================================
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., example="admin")
+    password: str = Field(..., example="#siemprevalientes")
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(..., min_length=3, example="tecnico1")
+    password: str = Field(..., min_length=4, example="clave123")
+    rol: str = Field(..., example="editor")
+    nombre_completo: Optional[str] = Field(None, example="Director Deportivo")
+
+
+class UserUpdateRequest(BaseModel):
+    rol: Optional[str] = None
+    activo: Optional[bool] = None
+    nombre_completo: Optional[str] = None
+
+
+class UserPasswordChangeRequest(BaseModel):
+    password: str = Field(..., min_length=4)
+
 
 class AthleteCreate(BaseModel):
     name: str = Field(..., example="Mario Aparicio")
@@ -335,12 +375,84 @@ def _calcular_metricas_grupo_carrera(
 
 
 # =============================================================================
+# Dependencias de Autenticación y Control de Roles (RBAC)
+# =============================================================================
+
+def extraer_token_peticion(request: Request) -> Optional[str]:
+    """Extrae el token de autenticación de cookies, cabecera Authorization o parámetro query."""
+    # 1. Cookie 'ifa_session'
+    token = request.cookies.get("ifa_session")
+    if token:
+        return token.strip()
+
+    # 2. Header 'Authorization: Bearer <token>'
+    auth_hdr = request.headers.get("Authorization")
+    if auth_hdr and auth_hdr.startswith("Bearer "):
+        return auth_hdr[7:].strip()
+
+    # 3. Query param 'session_token'
+    query_token = request.query_params.get("session_token")
+    if query_token:
+        return query_token.strip()
+
+    return None
+
+
+def get_current_user_optional(request: Request) -> Optional[Dict[str, Any]]:
+    """Devuelve los datos del usuario autenticado o None si no hay sesión válida."""
+    token = extraer_token_peticion(request)
+    if not token:
+        return None
+    return validar_sesion(token)
+
+
+def get_current_user(request: Request) -> Dict[str, Any]:
+    """Dependencia obligatoria: Devuelve el usuario o lanza HTTP 401."""
+    user = get_current_user_optional(request)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No autenticado. Por favor inicia sesión para acceder a la plataforma."
+        )
+    return user
+
+
+def require_role(allowed_roles: List[str]):
+    """Dependencia que valida que el usuario tenga uno de los roles permitidos."""
+    def _role_checker(current_user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+        user_role = current_user.get("rol")
+        if user_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Permisos insuficientes. Se requiere rol: {', '.join(allowed_roles)}. Tu rol actual es: '{user_role}'."
+            )
+        return current_user
+    return _role_checker
+
+
+# =============================================================================
 # Rutas de Vistas y Templates
 # =============================================================================
 
+@app.get("/login", response_class=HTMLResponse)
+def login_view(request: Request):
+    """Sirve la pantalla de inicio de sesión o redirige al inicio si ya hay sesión activa."""
+    user = get_current_user_optional(request)
+    if user:
+        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
+    login_file = TEMPLATES_DIR / "login.html"
+    if not login_file.exists():
+        return HTMLResponse("<h1>Login</h1><p>Template login.html no encontrado.</p>")
+    with open(login_file, "r", encoding="utf-8") as f:
+        return HTMLResponse(f.read())
+
+
 @app.get("/", response_class=HTMLResponse)
-def index_view():
-    """Sirve la Single Page Application (SPA) principal."""
+def index_view(request: Request):
+    """Sirve la Single Page Application (SPA) principal si está autenticado."""
+    user = get_current_user_optional(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
     index_file = TEMPLATES_DIR / "index.html"
     if not index_file.exists():
         return HTMLResponse("<h1>Intervals Fit Analytics Platform</h1><p>Template no encontrado.</p>")
@@ -349,8 +461,11 @@ def index_view():
 
 
 @app.get("/view-profile/{filename}", response_class=HTMLResponse)
-def view_profile_html(filename: str):
-    """Sirve los perfiles interactivos HTML generados en output/."""
+def view_profile_html(filename: str, request: Request):
+    """Sirve los perfiles interactivos HTML generados en output/ si está autenticado."""
+    user = get_current_user_optional(request)
+    if not user:
+        return RedirectResponse(url="/login", status_code=status.HTTP_302_FOUND)
     file_path = OUTPUT_DIR / filename
     if not file_path.exists() or not file_path.name.endswith(".html"):
         raise HTTPException(status_code=404, detail="Perfil interactivo no encontrado.")
@@ -359,11 +474,135 @@ def view_profile_html(filename: str):
 
 
 # =============================================================================
+# Endpoints de Autenticación
+# =============================================================================
+
+@app.post("/api/auth/login")
+def login_endpoint(payload: LoginRequest, response: Response):
+    """Valida credenciales y genera sesión activa."""
+    user = autenticar_usuario(payload.username, payload.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario o contraseña incorrectos, o cuenta inactiva."
+        )
+
+    token = crear_sesion(user["username"], user["rol"])
+    # Establecer cookie segura HttpOnly por 7 días
+    response.set_cookie(
+        key="ifa_session",
+        value=token,
+        max_age=7 * 24 * 3600,
+        httponly=True,
+        samesite="lax"
+    )
+    return {
+        "ok": True,
+        "token": token,
+        "user": user,
+        "message": f"Bienvenido, {user['nombre_completo']}."
+    }
+
+
+@app.post("/api/auth/logout")
+def logout_endpoint(request: Request, response: Response):
+    """Cierra la sesión actual y purga la cookie."""
+    token = extraer_token_peticion(request)
+    if token:
+        cerrar_sesion(token)
+    response.delete_cookie("ifa_session")
+    return {"ok": True, "message": "Sesión cerrada correctamente."}
+
+
+@app.get("/api/auth/me")
+def me_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Devuelve los datos del usuario actualmente autenticado y su rol."""
+    return current_user
+
+
+# =============================================================================
+# Endpoints de Gestión de Usuarios (Rol Administrador)
+# =============================================================================
+
+@app.get("/api/users")
+def list_users_endpoint(current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))):
+    """Lista todos los usuarios del sistema (solo Administrador)."""
+    return listar_usuarios()
+
+
+@app.post("/api/users")
+def create_user_endpoint(payload: UserCreateRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))):
+    """Crea un nuevo usuario en la plataforma (solo Administrador)."""
+    try:
+        user = crear_usuario(
+            username=payload.username,
+            password=payload.password,
+            rol=payload.rol,
+            nombre_completo=payload.nombre_completo
+        )
+        return {"ok": True, "user": user, "message": f"Usuario '{user['username']}' creado exitosamente."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/users/{username}")
+def update_user_endpoint(
+    username: str,
+    payload: UserUpdateRequest,
+    current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))
+):
+    """Actualiza el rol, nombre o estado de un usuario (solo Administrador)."""
+    try:
+        actualizar_usuario(
+            username=username,
+            rol=payload.rol,
+            activo=payload.activo,
+            nombre_completo=payload.nombre_completo
+        )
+        return {"ok": True, "message": f"Usuario '{username}' actualizado correctamente."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.put("/api/users/{username}/password")
+def change_user_password_endpoint(
+    username: str,
+    payload: UserPasswordChangeRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """Cambia la contraseña de un usuario (Administrador o el propio usuario)."""
+    if current_user["rol"] != ROL_ADMINISTRADOR and current_user["username"].lower() != username.strip().lower():
+        raise HTTPException(status_code=403, detail="No tienes permisos para cambiar la contraseña de otro usuario.")
+
+    try:
+        cambiar_password(username, payload.password)
+        return {"ok": True, "message": f"Contraseña actualizada para '{username}'."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/users/{username}")
+def delete_user_endpoint(
+    username: str,
+    current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))
+):
+    """Elimina un usuario del sistema (solo Administrador)."""
+    if current_user["username"].lower() == username.strip().lower():
+        raise HTTPException(status_code=400, detail="No puedes eliminar tu propia cuenta de administrador.")
+
+    try:
+        eliminar_usuario(username)
+        return {"ok": True, "message": f"Usuario '{username}' eliminado con éxito."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =============================================================================
 # Endpoints de Dashboard y Resumen General
 # =============================================================================
 
 @app.get("/api/dashboard")
-def get_dashboard_summary():
+def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve los indicadores clave del equipo y estado de la base de datos."""
     db_stats = obtener_estadisticas_generales_bd()
     roster_df = cargar_roster()
@@ -458,7 +697,7 @@ def _guardar_roster_csv(df: pd.DataFrame):
 
 
 @app.get("/api/athletes")
-def list_athletes():
+def list_athletes(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve la lista completa de ciclistas del equipo."""
     df = cargar_roster()
     if df.empty:
@@ -478,7 +717,7 @@ def list_athletes():
 
 
 @app.post("/api/athletes")
-def create_athlete(athlete: AthleteCreate):
+def create_athlete(athlete: AthleteCreate, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Registra un nuevo ciclista tanto en CSV como en la base de datos SQLite."""
     df = cargar_roster()
     aid = athlete.intervals_id.strip()
@@ -515,7 +754,7 @@ def create_athlete(athlete: AthleteCreate):
 
 
 @app.put("/api/athletes/{athlete_id}")
-def update_athlete(athlete_id: str, athlete: AthleteUpdate):
+def update_athlete(athlete_id: str, athlete: AthleteUpdate, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Actualiza la información de un ciclista existente."""
     df = cargar_roster()
     aid = str(athlete_id).strip()
@@ -553,7 +792,7 @@ def update_athlete(athlete_id: str, athlete: AthleteUpdate):
 
 
 @app.delete("/api/athletes/{athlete_id}")
-def delete_athlete(athlete_id: str):
+def delete_athlete(athlete_id: str, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))):
     """Elimina un ciclista del roster y de la base de datos."""
     df = cargar_roster()
     aid = str(athlete_id).strip()
@@ -577,7 +816,7 @@ def delete_athlete(athlete_id: str):
 # =============================================================================
 
 @app.get("/api/races")
-def list_races(estado: Optional[str] = Query(None)):
+def list_races(estado: Optional[str] = Query(None), current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve el calendario completo de carreras con su estado y convocatoria."""
     carreras = obtener_carreras_calendario(filtro_estado=estado, db_path=HISTORY_DB_PATH)
 
@@ -590,7 +829,7 @@ def list_races(estado: Optional[str] = Query(None)):
 
 
 @app.post("/api/races")
-def create_race(payload: RaceCreateRequest):
+def create_race(payload: RaceCreateRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Da de alta o actualiza una carrera con sus fechas y su convocatoria."""
     datos = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
     atletas = datos.pop("atletas_ids", [])
@@ -603,7 +842,7 @@ def create_race(payload: RaceCreateRequest):
 
 
 @app.get("/api/races/{carrera_id}")
-def get_race_detail(carrera_id: str):
+def get_race_detail(carrera_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve el detalle de una carrera del calendario y su convocatoria."""
     c = obtener_carrera_detalle(carrera_id, db_path=HISTORY_DB_PATH)
     if not c:
@@ -612,7 +851,7 @@ def get_race_detail(carrera_id: str):
 
 
 @app.put("/api/races/{carrera_id}")
-def update_race_endpoint(carrera_id: str, payload: RaceCreateRequest):
+def update_race_endpoint(carrera_id: str, payload: RaceCreateRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Actualiza los metadatos y convocatoria de una carrera existente."""
     datos = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
     datos["carrera_id"] = carrera_id
@@ -626,14 +865,14 @@ def update_race_endpoint(carrera_id: str, payload: RaceCreateRequest):
 
 
 @app.delete("/api/races/{carrera_id}")
-def delete_race_endpoint(carrera_id: str):
+def delete_race_endpoint(carrera_id: str, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))):
     """Elimina una carrera y su convocatoria asociada."""
     eliminar_carrera(carrera_id, db_path=HISTORY_DB_PATH)
     return {"status": "ok", "message": f"Carrera '{carrera_id}' eliminada con éxito."}
 
 
 @app.get("/api/races/{carrera_id}/convocatoria")
-def get_race_convocatoria(carrera_id: str):
+def get_race_convocatoria(carrera_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve la lista de ciclistas convocados para una carrera."""
     convocados = obtener_convocados_carrera(carrera_id, db_path=HISTORY_DB_PATH)
     return {
@@ -644,7 +883,7 @@ def get_race_convocatoria(carrera_id: str):
 
 
 @app.post("/api/races/{carrera_id}/convocatoria")
-def set_race_convocatoria(carrera_id: str, payload: ConvocatoriaUpdateRequest):
+def set_race_convocatoria(carrera_id: str, payload: ConvocatoriaUpdateRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Actualiza la nómina de ciclistas convocados para una carrera."""
     asignar_convocados_carrera(carrera_id, payload.athlete_ids, db_path=HISTORY_DB_PATH)
     return {
@@ -656,7 +895,7 @@ def set_race_convocatoria(carrera_id: str, payload: ConvocatoriaUpdateRequest):
 
 
 @app.post("/api/races/assign")
-def assign_athletes_race(payload: RaceAssign):
+def assign_athletes_race(payload: RaceAssign, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Asigna masivamente ciclistas a un grupo de carrera (0, 1 o 2)."""
     df = cargar_roster()
     if df.empty:
@@ -676,7 +915,7 @@ def assign_athletes_race(payload: RaceAssign):
 
 
 @app.get("/api/race-groups")
-def get_race_groups():
+def get_race_groups(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve la configuración y métricas enriquecidas de los grupos de carrera 1 y 2."""
     configs_list = obtener_config_grupos_carrera()
     configs = {c["grupo_id"]: c for c in configs_list}
@@ -708,7 +947,7 @@ def get_race_groups():
 
 
 @app.post("/api/race-groups/{grupo_id}")
-def update_race_group(grupo_id: int, payload: RaceGroupUpdateRequest):
+def update_race_group(grupo_id: int, payload: RaceGroupUpdateRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Actualiza la carrera y metadatos de un grupo de competición."""
     if grupo_id not in [1, 2]:
         raise HTTPException(status_code=400, detail="Solo se pueden configurar los grupos de carrera 1 y 2.")
@@ -719,7 +958,7 @@ def update_race_group(grupo_id: int, payload: RaceGroupUpdateRequest):
 
 
 @app.get("/api/races/{carrera_id}/history")
-def get_race_history(carrera_id: str):
+def get_race_history(carrera_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve la evolución etapa por etapa y métricas acumuladas de una carrera."""
     df = obtener_historico_carrera_etapas(carrera_id)
     if df.empty:
@@ -754,7 +993,7 @@ def get_race_history(carrera_id: str):
 
 
 @app.get("/api/races/{carrera_id}/summary")
-def get_race_summary(carrera_id: str):
+def get_race_accumulated_summary(carrera_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve el balance consolidado por ciclista al término de la carrera."""
     df = obtener_resumen_acumulado_carrera(carrera_id)
     if df.empty:
@@ -800,7 +1039,8 @@ def get_race_summary(carrera_id: str):
 def get_season_bests(
     athlete_id: str,
     temporada: Optional[int] = Query(None, description="Año de la temporada (ej. 2026)"),
-    todas: bool = Query(False, description="Incluir todas las duraciones secundarias")
+    todas: bool = Query(False, description="Incluir todas las duraciones secundarias"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Devuelve la envolvente de potencia récord con kilojulios de fatiga previa y gasto total."""
     aid = str(athlete_id).strip()
@@ -840,7 +1080,8 @@ def get_season_bests(
 def get_fatigue_curve(
     athlete_id: str,
     umbral_kj: float = Query(2000.0, description="Umbral de kilojulios para fatiga"),
-    temporada: Optional[int] = Query(None)
+    temporada: Optional[int] = Query(None),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Devuelve la comparativa de potencia en fresco (< umbral_kj) frente a bajo fatiga (>= umbral_kj)."""
     aid = str(athlete_id).strip()
@@ -874,7 +1115,8 @@ def get_power_report_data(
     grupo: Optional[Union[int, str]] = Query(None, description="Grupo o carrera (slug, ID o número). None para todos."),
     carrera_id: Optional[str] = Query(None, description="Filtrar por carrera del calendario"),
     dias: int = Query(30, description="Días para picos recientes"),
-    dias_carga: int = Query(60, description="Días para métricas de carga")
+    dias_carga: int = Query(60, description="Días para métricas de carga"),
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Devuelve los datos procesados para el informe de potencias y carga."""
     client = IntervalsClient()
@@ -905,7 +1147,7 @@ def get_power_report_data(
             pass
 
     if not atletas:
-        return {"atletas": [], "peaks_table": [], "metrics_table": []}
+        return {"atletas": [], "peaks_table": [], "metrics_table": [], "load_timeseries": []}
 
     try:
         peaks_df_total = calcular_picos_potencia(
@@ -925,23 +1167,72 @@ def get_power_report_data(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al calcular informe de potencia: {e}")
 
-    # Formatear tabla de picos para el frontend SPA (app.js)
+    # Formatear tabla de picos para el frontend SPA (app.js) con comparativa de récord histórico
     peaks_json = []
     if not peaks_df_total.empty:
         for athlete_name, group_data in peaks_df_total.groupby('athlete_name'):
-            row = {'Ciclista': athlete_name}
+            row = {
+                'Ciclista': athlete_name,
+                'duraciones': {}
+            }
             dur_map = {r['duration_label']: r for _, r in group_data.iterrows()}
-            for dur in ['5s', '1m', '5m', '20m']:
+            for dur in ['5s', '30s', '1m', '5m', '10m', '20m']:
                 item = dur_map.get(dur)
-                if item is not None and pd.notna(item.get('peak_watts')):
-                    row[f"{dur} (W)"] = int(item['peak_watts'])
-                    row[f"{dur} (W/kg)"] = round(float(item['peak_wkg']), 2) if pd.notna(item.get('peak_wkg')) else '-'
-                elif item is not None and pd.notna(item.get('all_time_watts')):
-                    row[f"{dur} (W)"] = f"{int(item['all_time_watts'])} (PR)"
-                    row[f"{dur} (W/kg)"] = round(float(item['all_time_wkg']), 2) if pd.notna(item.get('all_time_wkg')) else '-'
+                peak_w = float(item['peak_watts']) if (item is not None and pd.notna(item.get('peak_watts'))) else None
+                peak_wkg = round(float(item['peak_wkg']), 2) if (item is not None and pd.notna(item.get('peak_wkg'))) else None
+                peak_date = str(item.get('peak_date') or '') if item is not None else ''
+
+                hist_w = float(item['all_time_watts']) if (item is not None and pd.notna(item.get('all_time_watts'))) else None
+                hist_wkg = round(float(item['all_time_wkg']), 2) if (item is not None and pd.notna(item.get('all_time_wkg'))) else None
+                hist_date = str(item.get('all_time_date') or '') if item is not None else ''
+
+                pct_pr = None
+                delta_w = None
+                delta_wkg = None
+                es_pr = False
+
+                if peak_w is not None and hist_w is not None and hist_w > 0:
+                    pct_pr = round((peak_w / hist_w) * 100.0, 1)
+                    delta_w = round(peak_w - hist_w, 1)
+                    if peak_wkg is not None and hist_wkg is not None:
+                        delta_wkg = round(peak_wkg - hist_wkg, 2)
+                    es_pr = bool(peak_w >= hist_w)
+                elif peak_w is not None and (hist_w is None or hist_w == 0):
+                    pct_pr = 100.0
+                    delta_w = 0.0
+                    delta_wkg = 0.0
+                    es_pr = True
+
+                dur_info = {
+                    'peak_watts': int(round(peak_w)) if peak_w is not None else None,
+                    'peak_wkg': peak_wkg,
+                    'peak_date': peak_date,
+                    'all_time_watts': int(round(hist_w)) if hist_w is not None else None,
+                    'all_time_wkg': hist_wkg,
+                    'all_time_date': hist_date,
+                    'pct_pr': pct_pr,
+                    'delta_watts': delta_w,
+                    'delta_wkg': delta_wkg,
+                    'es_pr': es_pr
+                }
+                row['duraciones'][dur] = dur_info
+
+                # Mantener compatibilidad retroactiva con claves clásicas
+                if peak_w is not None:
+                    row[f"{dur} (W)"] = int(round(peak_w))
+                    row[f"{dur} (W/kg)"] = peak_wkg if peak_wkg is not None else '-'
+                elif hist_w is not None:
+                    row[f"{dur} (W)"] = f"{int(round(hist_w))} (PR)"
+                    row[f"{dur} (W/kg)"] = hist_wkg if hist_wkg is not None else '-'
                 else:
                     row[f"{dur} (W)"] = '-'
                     row[f"{dur} (W/kg)"] = '-'
+
+                # Claves planas de récord
+                row[f"{dur} PR (W)"] = int(round(hist_w)) if hist_w is not None else '-'
+                row[f"{dur} PR (W/kg)"] = hist_wkg if hist_wkg is not None else '-'
+                row[f"{dur} (% PR)"] = pct_pr if pct_pr is not None else '-'
+
             peaks_json.append(row)
 
     # Formatear tabla de métricas de carga (un registro resumido actual por ciclista)
@@ -989,6 +1280,61 @@ def get_power_report_data(
         if nom not in processed_names:
             metrics_json.append(m)
 
+    # Serializar serie temporal continua de carga (CTL, ATL, TSB, TSS) para gráficos
+    load_timeseries = []
+    if not metrics_df_total.empty:
+        m_sorted = metrics_df_total.sort_values(['athlete_name', 'fecha']).copy()
+
+        # Calcular serie promedio del equipo
+        avg_df = (
+            m_sorted.groupby('fecha', as_index=False)
+            .agg({
+                'ctl': 'mean',
+                'atl': 'mean',
+                'tsb': 'mean',
+                'daily_load': 'mean',
+                'ramp_rate_7d': 'mean'
+            })
+            .sort_values('fecha')
+        )
+        avg_puntos = []
+        for _, r in avg_df.iterrows():
+            f_obj = r['fecha']
+            f_str = f_obj.strftime('%Y-%m-%d') if hasattr(f_obj, 'strftime') else str(f_obj)[:10]
+            avg_puntos.append({
+                'fecha': f_str,
+                'ctl': round(float(r['ctl']), 1) if pd.notna(r['ctl']) else None,
+                'atl': round(float(r['atl']), 1) if pd.notna(r['atl']) else None,
+                'tsb': round(float(r['tsb']), 1) if pd.notna(r['tsb']) else None,
+                'daily_load': round(float(r['daily_load']), 1) if pd.notna(r['daily_load']) else 0.0,
+                'ramp_rate': round(float(r['ramp_rate_7d']), 2) if pd.notna(r['ramp_rate_7d']) else None
+            })
+        if avg_puntos:
+            load_timeseries.append({
+                'athlete_name': '⭐ Media del Equipo',
+                'is_team_avg': True,
+                'series': avg_puntos
+            })
+
+        for athlete_name, g in m_sorted.groupby('athlete_name'):
+            puntos = []
+            for _, r in g.iterrows():
+                f_obj = r['fecha']
+                f_str = f_obj.strftime('%Y-%m-%d') if hasattr(f_obj, 'strftime') else str(f_obj)[:10]
+                puntos.append({
+                    'fecha': f_str,
+                    'ctl': round(float(r['ctl']), 1) if pd.notna(r['ctl']) else None,
+                    'atl': round(float(r['atl']), 1) if pd.notna(r['atl']) else None,
+                    'tsb': round(float(r['tsb']), 1) if pd.notna(r['tsb']) else None,
+                    'daily_load': round(float(r['daily_load']), 1) if pd.notna(r['daily_load']) else 0.0,
+                    'ramp_rate': round(float(r['ramp_rate_7d']), 2) if pd.notna(r['ramp_rate_7d']) else None
+                })
+            load_timeseries.append({
+                'athlete_name': athlete_name,
+                'is_team_avg': False,
+                'series': puntos
+            })
+
     return {
         "grupo": grupo,
         "carrera_id": carrera_id,
@@ -996,12 +1342,13 @@ def get_power_report_data(
         "dias_carga": dias_carga,
         "peaks_table": peaks_json,
         "metrics_table": metrics_json,
+        "load_timeseries": load_timeseries,
         "total_atletas": len(atletas)
     }
 
 
 @app.post("/api/power-report/export")
-def export_power_report(payload: PowerReportExportRequest):
+def export_power_report(payload: PowerReportExportRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Genera los archivos descargables en PDF y/o Word del informe de potencia."""
     client = IntervalsClient()
     roster_df = cargar_roster()
@@ -1100,7 +1447,7 @@ def export_power_report(payload: PowerReportExportRequest):
 # =============================================================================
 
 @app.get("/api/stage/list")
-def list_available_stages():
+def list_stages_available(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve las etapas y perfiles HTML ya generados o disponibles en SQLite."""
     # 1. Buscar HTMLs generados en output/
     html_files = []
@@ -1139,7 +1486,7 @@ def list_available_stages():
 
 
 @app.post("/api/stage/analyze")
-def analyze_stage(payload: StageAnalyzeRequest):
+def analyze_stage(payload: StageAnalyzeRequest, current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))):
     """Ejecuta el análisis de etapa, genera el perfil interactivo y reportes ejecutivos."""
     client = IntervalsClient()
     roster_df = cargar_roster()
@@ -1254,7 +1601,7 @@ def _run_background_sync(desde: str):
 
 
 @app.post("/api/sync")
-def trigger_sync(background_tasks: BackgroundTasks, desde: str = Query("2026-01-01")):
+def trigger_sync(background_tasks: BackgroundTasks, desde: str = Query("2026-01-01"), current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))):
     """Inicia la sincronización masiva con Intervals.icu en segundo plano."""
     global _SYNC_STATUS
     if _SYNC_STATUS["running"]:
@@ -1265,13 +1612,13 @@ def trigger_sync(background_tasks: BackgroundTasks, desde: str = Query("2026-01-
 
 
 @app.get("/api/sync/status")
-def get_sync_status():
+def get_sync_status(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve el estado de la tarea de sincronización."""
     return _SYNC_STATUS
 
 
 @app.get("/api/download/{folder}/{filename}")
-def download_file(folder: str, filename: str):
+def download_file(folder: str, filename: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Descarga de forma segura archivos generados (PDF, DOCX, HTML)."""
     if folder == "output":
         target_path = OUTPUT_DIR / filename

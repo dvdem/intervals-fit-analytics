@@ -250,6 +250,13 @@ def init_history_db(db_path: Optional[Union[str, Path]] = None) -> Path:
 
         conn.commit()
 
+    # Inicializar tablas de autenticación y asegurar usuario admin por defecto
+    try:
+        from src.auth_manager import init_auth_db
+    except (ImportError, ValueError):
+        from .auth_manager import init_auth_db
+    init_auth_db(path)
+
     return path
 
 
@@ -806,6 +813,7 @@ def obtener_convocados_carrera(
             convocados.append({
                 "atleta_id": r[0],
                 "nombre": r[1],
+                "name": r[1],
                 "peso": r[2] or 70.0,
                 "ftp": r[3] or 380.0,
                 "dorsal": r[4],
@@ -892,6 +900,7 @@ def obtener_carreras_calendario(
             convocados = [{
                 "atleta_id": cr[0],
                 "nombre": cr[1],
+                "name": cr[1],
                 "rol": cr[2] or "Corredor",
                 "dorsal": cr[3]
             } for cr in conv_rows]
@@ -972,7 +981,7 @@ def obtener_carreras_activas_fecha(
                 WHERE cc.carrera_id = ?
                 ORDER BY cc.dorsal ASC, nombre ASC;
             """, (cid,))
-            conv = [{"atleta_id": cr[0], "nombre": cr[1], "rol": cr[2], "dorsal": cr[3]} for cr in conv_cursor.fetchall()]
+            conv = [{"atleta_id": cr[0], "nombre": cr[1], "name": cr[1], "rol": cr[2], "dorsal": cr[3]} for cr in conv_cursor.fetchall()]
             carreras.append({
                 "carrera_id": cid,
                 "nombre_carrera": r[1],
@@ -1052,7 +1061,7 @@ def resolver_carrera(
                 WHERE cc.carrera_id = ?
                 ORDER BY cc.dorsal ASC, nombre ASC;
             """, (cid,))
-            conv = [{"atleta_id": cr[0], "nombre": cr[1], "rol": cr[2], "dorsal": cr[3]} for cr in conv_cursor.fetchall()]
+            conv = [{"atleta_id": cr[0], "nombre": cr[1], "name": cr[1], "rol": cr[2], "dorsal": cr[3]} for cr in conv_cursor.fetchall()]
             return {
                 "carrera_id": cid,
                 "nombre_carrera": row[1],
