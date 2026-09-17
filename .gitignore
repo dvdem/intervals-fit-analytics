@@ -22,6 +22,9 @@ scratch/
 *.exe
 *.winmd
 *.pem
+*.db
+*.db-wal
+*.db-shm
 
 # Certificados SSL
 fmt_system_ca.pem

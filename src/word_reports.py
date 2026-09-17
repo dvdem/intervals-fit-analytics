@@ -21,15 +21,24 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# python-docx
-import docx
-from docx import Document
-from docx.enum.section import WD_ORIENTATION, WD_SECTION
-from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement, parse_xml
-from docx.oxml.ns import nsdecls, qn
-from docx.shared import Inches, Pt, RGBColor
+# python-docx (opcional con aviso)
+try:
+    import docx
+    from docx import Document
+    from docx.enum.section import WD_ORIENTATION, WD_SECTION
+    from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml import OxmlElement, parse_xml
+    from docx.oxml.ns import nsdecls, qn
+    from docx.shared import Inches, Pt, RGBColor
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+    docx = None
+    Document = None
+    WD_ORIENTATION = WD_SECTION = WD_ALIGN_VERTICAL = WD_TABLE_ALIGNMENT = WD_ALIGN_PARAGRAPH = None
+    OxmlElement = parse_xml = nsdecls = qn = None
+    Inches = Pt = RGBColor = None
 
 try:
     from config import DEFAULT_LOGO_PATH, OUTPUT_DIR
@@ -103,7 +112,7 @@ def _format_table_data_row(
     aligns: Optional[List[int]] = None,
     bold_cols: Optional[List[int]] = None,
     font_size_pt: float = 8.0,
-    text_colors: Optional[Dict[int, RGBColor]] = None
+    text_colors: Optional[Dict[int, Any]] = None
 ):
     """Formatea una fila de datos con sombreado alterno y bordes finos."""
     bg_hex = "F8FAFC" if is_even else "FFFFFF"
@@ -861,13 +870,21 @@ def generar_informe_potencias_y_carga_word(
     titulo: Optional[str] = None,
     subtitulo: Optional[str] = None,
     grupo_carrera: Optional[Union[int, str]] = None,
+    carrera_id: Optional[str] = None,
+    nombre_carrera: Optional[str] = None,
 ) -> Path:
     """
     Genera el documento Word (.docx) de 2 páginas con el informe de picos de potencia y evolución de carga (CTL/ATL/TSB).
     Incluye gráficos en alta resolución y tablas nativas editables con resaltado semafórico de PRs y zonas de forma.
     """
     if output_docx is None:
-        label = f"_carrera_{grupo_carrera}" if grupo_carrera else ""
+        c_slug = re.sub(r'[^a-zA-Z0-9]+', '_', (carrera_id or '').lower()).strip('_')
+        if c_slug:
+            label = f"_{c_slug}"
+        elif grupo_carrera:
+            label = f"_carrera_{grupo_carrera}"
+        else:
+            label = ""
         output_docx = OUTPUT_DIR / f"intervals_informe{label}.docx"
     else:
         output_docx = Path(output_docx)
@@ -917,12 +934,13 @@ def generar_informe_potencias_y_carga_word(
             logo_file = png_cand
 
     # Títulos
+    nom_car = nombre_carrera or (f"Carrera {grupo_carrera}" if grupo_carrera else "")
     if titulo:
         tit_pot = titulo
         tit_carga = f"{titulo} - Carga, Fatiga y Forma"
-    elif grupo_carrera:
-        tit_pot = f"Informe de Potencias - Carrera {grupo_carrera}"
-        tit_carga = f"Informe de Carga, Fatiga y Forma - Carrera {grupo_carrera}"
+    elif nom_car:
+        tit_pot = f"Informe de Potencias - {nom_car}"
+        tit_carga = f"Informe de Carga, Fatiga y Forma - {nom_car}"
     else:
         tit_pot = "Informe de Potencias"
         tit_carga = "Informe de Carga, Fatiga y Forma"

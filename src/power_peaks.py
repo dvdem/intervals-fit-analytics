@@ -644,26 +644,34 @@ def generar_tabla_picos_comparativa(peaks_df: pd.DataFrame) -> Tuple[pd.DataFram
         return pd.DataFrame(), pd.DataFrame()
 
     orden_duraciones = ['5s', '30s', '1m', '5m', '10m', '20m']
+    todos_atletas = [a for a in peaks_df['athlete_name'].dropna().unique() if a]
+    if not todos_atletas:
+        return pd.DataFrame(), pd.DataFrame()
 
     def _construir_tabla(watts_col, wkg_col, fecha_col, es_reciente=False):
         tabla_watts = peaks_df.pivot_table(
             index='duration_label', columns='athlete_name', values=watts_col, aggfunc='max'
-        ).reindex(orden_duraciones)
+        ).reindex(index=orden_duraciones, columns=todos_atletas)
         tabla_wkg = peaks_df.pivot_table(
             index='duration_label', columns='athlete_name', values=wkg_col, aggfunc='max'
-        ).reindex(orden_duraciones)
-        tabla_fecha = (
-            peaks_df.dropna(subset=[watts_col])
-            .sort_values(watts_col, ascending=False)
-            .drop_duplicates(subset=['duration_label', 'athlete_name'])
-            .pivot_table(
-                index='duration_label', columns='athlete_name', values=fecha_col, aggfunc='first'
+        ).reindex(index=orden_duraciones, columns=todos_atletas)
+
+        subset_fecha = peaks_df.dropna(subset=[watts_col])
+        if not subset_fecha.empty:
+            tabla_fecha = (
+                subset_fecha.sort_values(watts_col, ascending=False)
+                .drop_duplicates(subset=['duration_label', 'athlete_name'])
+                .pivot_table(
+                    index='duration_label', columns='athlete_name', values=fecha_col, aggfunc='first'
+                )
+                .reindex(index=orden_duraciones, columns=todos_atletas)
             )
-            .reindex(orden_duraciones)
-        )
+        else:
+            tabla_fecha = pd.DataFrame(index=orden_duraciones, columns=todos_atletas)
+
         tabla_hist_w = peaks_df.pivot_table(
             index='duration_label', columns='athlete_name', values='all_time_watts', aggfunc='max'
-        ).reindex(orden_duraciones)
+        ).reindex(index=orden_duraciones, columns=todos_atletas)
 
         tabla = tabla_watts.copy().astype(object)
         for fila in tabla.index:
@@ -697,8 +705,11 @@ def generar_tabla_picos_comparativa(peaks_df: pd.DataFrame) -> Tuple[pd.DataFram
     tabla_historica = _construir_tabla('all_time_watts', 'all_time_wkg', 'all_time_date', es_reciente=False)
 
     columnas_juntas = []
-    for ciclista in tabla_30_dias.columns:
+    for ciclista in todos_atletas:
         columnas_juntas.extend([(ciclista, '30 dias'), (ciclista, 'historico')])
+
+    if not columnas_juntas:
+        return pd.DataFrame(), pd.DataFrame()
 
     columnas_multi = pd.MultiIndex.from_tuples(columnas_juntas)
     tabla_peaks = pd.concat(
@@ -712,7 +723,7 @@ def generar_tabla_picos_comparativa(peaks_df: pd.DataFrame) -> Tuple[pd.DataFram
 
     # Matriz de colores semafóricos
     colores_tabla = pd.DataFrame('', index=tabla_peaks.index, columns=tabla_peaks.columns)
-    for ciclista in tabla_30_dias.columns:
+    for ciclista in todos_atletas:
         for duracion in orden_duraciones:
             reciente_df = peaks_df[
                 (peaks_df['athlete_name'] == ciclista) &

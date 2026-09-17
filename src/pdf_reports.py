@@ -243,10 +243,12 @@ def generar_informe_potencias_y_carga(
     titulo: Optional[str] = None,
     subtitulo: Optional[str] = None,
     grupo_carrera: Optional[Union[int, str]] = None,
+    carrera_id: Optional[str] = None,
+    nombre_carrera: Optional[str] = None,
 ) -> Path:
     """
     Genera el PDF de 2 páginas con el informe de picos de potencia y evolución de carga (CTL/ATL).
-    Permite especificar título personalizado o grupo de carrera para personalizar la cabecera.
+    Permite especificar título personalizado o carrera/grupo para personalizar la cabecera.
     """
     output_pdf = Path(output_pdf or (OUTPUT_DIR / 'intervals_informe.pdf'))
     logo_img = _buscar_logo_img(logo_path or (_ROOT_DIR / "assets" / "LOGO.svg"))
@@ -273,13 +275,14 @@ def generar_informe_potencias_y_carga(
         for i, nombre in enumerate(nombres_metricas)
     }
 
-    # Definir títulos de cabecera en función del grupo de carrera o título explícito
+    # Definir títulos de cabecera en función de la carrera o título explícito
+    nom_car = nombre_carrera or (f"Carrera {grupo_carrera}" if grupo_carrera else "")
     if titulo:
         tit_pot = titulo
         tit_carga = f"{titulo} - Carga, Fatiga y Forma"
-    elif grupo_carrera:
-        tit_pot = f"Informe de Potencias - Carrera {grupo_carrera}"
-        tit_carga = f"Informe de Carga, Fatiga y Forma - Carrera {grupo_carrera}"
+    elif nom_car:
+        tit_pot = f"Informe de Potencias - {nom_car}"
+        tit_carga = f"Informe de Carga, Fatiga y Forma - {nom_car}"
     else:
         tit_pot = 'Informe de Potencias'
         tit_carga = 'Informe de Carga, Fatiga y Forma'
@@ -508,6 +511,8 @@ def generar_informe_wellness_hrv(
     logo_path: Optional[Union[str, Path]] = None,
     titulo: Optional[str] = None,
     grupo_carrera: Optional[Union[int, str]] = None,
+    carrera_id: Optional[str] = None,
+    nombre_carrera: Optional[str] = None,
 ) -> Path:
     """
     Genera el informe en PDF de 2 páginas con la tabla de resumen y el gráfico
@@ -527,8 +532,9 @@ def generar_informe_wellness_hrv(
     fecha_min = df['date'].min().strftime('%d/%b/%Y')
     fecha_max = df['date'].max().strftime('%d/%b/%Y')
 
-    tit_w = titulo or (f"INFORME DE BIENESTAR (WELLNESS) - CARRERA {grupo_carrera}" if grupo_carrera else "INFORME DE BIENESTAR (WELLNESS) DE ATLETAS")
-    tit_graf = f"{titulo} - Evolución HRV" if titulo else (f"Evolución de HRV (RMSSD) - Carrera {grupo_carrera}" if grupo_carrera else "Evolución de HRV (RMSSD) por Ciclista")
+    nom_c = nombre_carrera or (f"Carrera {grupo_carrera}" if grupo_carrera else "")
+    tit_w = titulo or (f"INFORME DE BIENESTAR (WELLNESS) - {nom_c.upper()}" if nom_c else "INFORME DE BIENESTAR (WELLNESS) DE ATLETAS")
+    tit_graf = f"{titulo} - Evolución HRV" if titulo else (f"Evolución de HRV (RMSSD) - {nom_c}" if nom_c else "Evolución de HRV (RMSSD) por Ciclista")
 
     def crear_pagina_resumen(pdf):
         fig, ax = plt.subplots(figsize=(11, 8.5))

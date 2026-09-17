@@ -41,6 +41,7 @@ NOTEBOOKS_DIR = BASE_DIR / "notebooks"
 
 DEFAULT_ROSTER_PATH = DATA_DIR / "burgos.csv"
 DEFAULT_LOGO_PATH = ASSETS_DIR / "LOGO.svg" if (ASSETS_DIR / "LOGO.svg").exists() else (ASSETS_DIR / "LOGO.png")
+HISTORY_DB_PATH = DATA_DIR / "historico_equipo.db"
 
 # Asegurar que los directorios existan
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

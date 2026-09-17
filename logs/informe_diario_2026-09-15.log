@@ -1,0 +1,44 @@
+﻿**********************
+Inicio de la transcripción de Windows PowerShell
+Hora de inicio: 20260915131515
+Nombre de usuario: DVDEBOOK\echav
+Usuario RunAs: DVDEBOOK\echav
+Nombre de la configuración: 
+Máquina: DVDEBOOK (Microsoft Windows NT 10.0.26340.0)
+Aplicación host: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+Id. de proceso: 38612
+PSVersion: 5.1.26100.9482
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.9482
+BuildVersion: 10.0.26100.9482
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+La transcripción ha comenzado. El archivo de salida es C:\Users\echav\OneDrive\Documentos\GitHub\procyclingstats\intervals_fit_analytics\logs\informe_diario_2026-09-15.log
+=======================================================
+GENERANDO PERFIL INTERACTIVO DE ETAPA
+Fecha objetivo: 2026-09-15
+=======================================================
+analytics\output\etapa_2026-09-15_Grupo_Carrera_2.docx
+�� Guardados métricas de rendimiento y gasto de 1 ciclistas en base de datos histórica.
+
+=======================================================
+�� ¡PERFILES DE ETAPA GENERADOS CON ÉXITO!
+=======================================================
+   �� Carrera 1: C:\Users\echav\OneDrive\Documentos\GitHub\procyclingstats\intervals_fit_analytics\output\etapa_2026-09-
+15_Grupo_Carrera_1.html
+      �� Word: C:\Users\echav\OneDrive\Documentos\GitHub\procyclingstats\intervals_fit_analytics\output\etapa_2026-09-15
+_Grupo_Carrera_1.docx
+   �� Carrera 2: C:\Users\echav\OneDrive\Documentos\GitHub\procyclingstats\intervals_fit_analytics\output\etapa_2026-09-
+15_Grupo_Carrera_2.html
+      �� Word: C:\Users\echav\OneDrive\Documentos\GitHub\procyclingstats\intervals_fit_analytics\output\etapa_2026-09-15
+_Grupo_Carrera_2.docx
+�� Ábrelos en cualquier navegador o visor para ver el análisis completo.
+=======================================================
+Correo enviado desde echavarri.david@gmail.com a davide@burgosproteam.com con 4 archivo(s).
+**********************
+Fin de la transcripción de Windows PowerShell
+Hora de finalización: 20260915131624
+**********************

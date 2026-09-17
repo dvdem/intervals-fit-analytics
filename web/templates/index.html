@@ -1,0 +1,904 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Intervals Fit Analytics - Pro Cycling Platform</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <!-- Chart.js para visualizaciones dinámicas de potencia y fatiga -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<div class="app-container">
+
+  <!-- SIDEBAR DE NAVEGACIÓN -->
+  <aside class="sidebar">
+    <div class="brand-header">
+      <div class="brand-logo">⚡</div>
+      <div>
+        <div class="brand-title">Intervals Fit</div>
+        <div class="brand-subtitle">Pro Cycling Analytics</div>
+      </div>
+    </div>
+
+    <ul class="nav-menu">
+      <li class="nav-item active" data-tab="tab-dashboard">
+        <button type="button">
+          <span class="nav-icon">📊</span>
+          <span>Dashboard Equipo</span>
+        </button>
+      </li>
+      <li class="nav-item" data-tab="tab-stage">
+        <button type="button">
+          <span class="nav-icon">🗺️</span>
+          <span>Análisis de Etapa</span>
+        </button>
+      </li>
+      <li class="nav-item" data-tab="tab-reports">
+        <button type="button">
+          <span class="nav-icon">📈</span>
+          <span>Power Reports</span>
+        </button>
+      </li>
+      <li class="nav-item" data-tab="tab-records">
+        <button type="button">
+          <span class="nav-icon">🏆</span>
+          <span>Récords y Fatiga (kJ)</span>
+        </button>
+      </li>
+      <li class="nav-item" data-tab="tab-admin">
+        <button type="button">
+          <span class="nav-icon">👥</span>
+          <span>Gestión de Equipo</span>
+        </button>
+      </li>
+    </ul>
+
+    <div class="sidebar-footer">
+      <span>SQLite WAL Active</span>
+      <span id="sidebar-db-size" class="badge badge-race-1">0 KB</span>
+    </div>
+  </aside>
+
+  <!-- CONTENIDO PRINCIPAL -->
+  <main class="main-wrapper">
+
+    <!-- Topbar Superior -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <h1 class="topbar-title" id="page-title">Dashboard General del Equipo</h1>
+      </div>
+      <div class="topbar-right">
+        <button class="btn btn-secondary btn-sm" id="btn-theme-toggle" title="Cambiar Tema (Claro / Oscuro)">
+          <span id="theme-toggle-icon">🌙</span>
+          <span id="theme-toggle-text">Modo Oscuro</span>
+        </button>
+        <button class="btn btn-secondary btn-sm" id="btn-sync-api" title="Sincronizar actividades y métricas con Intervals.icu">
+          <span>🔄</span>
+          <span>Sincronizar Intervals</span>
+        </button>
+        <div class="badge-status">
+          <span class="badge-dot"></span>
+          <span id="api-status-text">Conectado a Intervals.icu</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="content-area">
+
+      <!-- ===================================================================
+           PESTAÑA 1: DASHBOARD GENERAL
+           =================================================================== -->
+      <section id="tab-dashboard" class="tab-view active">
+        <!-- Tarjetas KPI -->
+        <div class="grid-kpi">
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span class="kpi-title">Ciclistas en Plantilla</span>
+              <span class="kpi-icon">🚴</span>
+            </div>
+            <div class="kpi-value" id="kpi-total-athletes">0</div>
+            <div class="kpi-subtext" id="kpi-active-racers">0 activos en competición</div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span class="kpi-title">Actividades y Etapas</span>
+              <span class="kpi-icon">📁</span>
+            </div>
+            <div class="kpi-value" id="kpi-total-activities">0</div>
+            <div class="kpi-subtext" id="kpi-races-count">0 carreras registradas</div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span class="kpi-title">Gasto Metabólico Total</span>
+              <span class="kpi-icon">⚡</span>
+            </div>
+            <div class="kpi-value" id="kpi-total-work">0 kJ</div>
+            <div class="kpi-subtext">Trabajo total registrado en temporada</div>
+          </div>
+
+          <div class="kpi-card">
+            <div class="kpi-header">
+              <span class="kpi-title">Récords MMP Almacenados</span>
+              <span class="kpi-icon">🎯</span>
+            </div>
+            <div class="kpi-value" id="kpi-total-peaks">0</div>
+            <div class="kpi-subtext">Con fatiga previa (kJ) calculada</div>
+          </div>
+        </div>
+
+        <!-- Convocatorias y Competiciones Activas -->
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>🏁</span> Bloques de Competición y Carreras Activas</h2>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn btn-secondary btn-sm" onclick="navigateToTab('tab-admin')">⚙️ Gestionar Convocatorias</button>
+            </div>
+          </div>
+          <div id="race-groups-container" class="race-groups-grid">
+            <div style="grid-column: 1 / -1; text-align: center; color: var(--text-dim); padding: 24px;">
+              Cargando información de las carreras y corredores convocados...
+            </div>
+          </div>
+        </div>
+
+        <!-- Últimas Etapas Registradas -->
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>📅</span> Historial Reciente de Etapas en la Base de Datos</h2>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Carrera / Competición</th>
+                  <th>Etapa</th>
+                  <th>Fecha</th>
+                  <th>Corredores con Datos</th>
+                  <th>Acción</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-recent-stages">
+                <tr><td colspan="5" style="text-align: center; color: var(--text-dim);">Cargando etapas...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           PESTAÑA 2: ANÁLISIS DE ETAPA (PERFIL INTERACTIVO)
+           =================================================================== -->
+      <section id="tab-stage" class="tab-view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>🗺️</span> Control y Generación de Perfil de Etapa</h2>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+              <a id="btn-download-stage-pdf" class="btn btn-secondary btn-sm" style="display: none;" target="_blank">
+                <span>📄</span> Descargar PDF Etapa
+              </a>
+              <a id="btn-download-stage-docx" class="btn btn-secondary btn-sm" style="display: none;" target="_blank">
+                <span>📝</span> Descargar Word (.docx)
+              </a>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; align-items: flex-end;">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Fecha de la Etapa</label>
+              <input type="date" id="stage-input-date" class="form-control" value="2026-08-06">
+            </div>
+
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Competición / Carrera</label>
+              <select id="stage-select-group" class="form-control">
+                <option value="">-- Autodetectar carrera activa por fecha --</option>
+                <option value="todos">Todos los corredores (Sin filtro)</option>
+                <option value="1">Grupo Carrera 1 (Histórico)</option>
+                <option value="2">Grupo Carrera 2 (Histórico)</option>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Título Personalizado</label>
+              <input type="text" id="stage-input-title" class="form-control" placeholder="Ej. Vuelta a Burgos - Etapa 3">
+            </div>
+
+            <button class="btn btn-primary" id="btn-run-stage-analysis">
+              <span>⚡</span>
+              <span>Analizar y Generar Perfil</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Selector de Perfiles ya generados -->
+        <div class="panel" style="padding: 16px 24px; margin-bottom: 20px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+            <span style="font-size: 0.9rem; font-weight: 600; color: var(--text-muted);">
+              📂 Perfiles interactivos generados en memoria:
+            </span>
+            <select id="select-cached-profiles" class="form-control" style="width: auto; min-width: 320px;">
+              <option value="">-- Seleccionar perfil generado recientemente --</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Visor Embebido del Perfil Interactivo -->
+        <div class="stage-viewer-container" id="stage-viewer-box">
+          <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: var(--text-dim); gap: 12px;">
+            <div style="font-size: 3rem;">🗺️</div>
+            <p>Selecciona una fecha o pulsa <strong>"Analizar y Generar Perfil"</strong> para visualizar el mapa GPS y la altimetría sincronizada.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           PESTAÑA 3: POWER & LOAD REPORTS
+           =================================================================== -->
+      <section id="tab-reports" class="tab-view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>📈</span> Informes de Rendimiento, Carga y Potencias</h2>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+              <button class="btn btn-primary btn-sm" id="btn-export-power-pdf">
+                <span>📄</span> Exportar a PDF
+              </button>
+              <button class="btn btn-emerald btn-sm" id="btn-export-power-docx">
+                <span>📝</span> Exportar a Word (.docx)
+              </button>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; align-items: flex-end;">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Competición a Evaluar</label>
+              <select id="report-select-group" class="form-control">
+                <option value="1">Grupo Carrera 1</option>
+                <option value="2">Grupo Carrera 2</option>
+                <option value="">Todo el Equipo</option>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Días Picos Recientes</label>
+              <select id="report-select-days-peaks" class="form-control">
+                <option value="30" selected>Últimos 30 días</option>
+                <option value="60">Últimos 60 días</option>
+                <option value="90">Últimos 90 días</option>
+                <option value="180">Últimos 180 días</option>
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Días Evolución Carga</label>
+              <select id="report-select-days-load" class="form-control">
+                <option value="60" selected>Últimos 60 días</option>
+                <option value="90">Últimos 90 días</option>
+                <option value="120">Últimos 120 días</option>
+              </select>
+            </div>
+
+            <button class="btn btn-secondary" id="btn-load-power-report">
+              <span>🔄</span> Actualizar Vista
+            </button>
+          </div>
+        </div>
+
+        <!-- Tabla Comparativa de Picos -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title"><span>⚡</span> Tabla Comparativa de Picos de Potencia Recientes</h3>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table" id="table-peaks-report">
+              <thead>
+                <tr>
+                  <th>Ciclista</th>
+                  <th>5s (W)</th>
+                  <th>5s (W/kg)</th>
+                  <th>1m (W)</th>
+                  <th>1m (W/kg)</th>
+                  <th>5m (W)</th>
+                  <th>5m (W/kg)</th>
+                  <th>20m (W)</th>
+                  <th>20m (W/kg)</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-peaks-report">
+                <tr><td colspan="9" style="text-align: center; color: var(--text-dim);">Haz clic en "Actualizar Vista" para cargar los picos.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Gráfico Comparativo de Potencias -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title"><span>📊</span> Comparativa Gráfica de Picos Clave (5s vs 1m vs 5m vs 20m)</h3>
+          </div>
+          <div style="height: 380px; position: relative;">
+            <canvas id="chart-peaks-comparison"></canvas>
+          </div>
+        </div>
+
+        <!-- Tabla de Carga y Bienestar -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title"><span>🔋</span> Métricas de Carga (CTL / ATL / TSB) y Forma Física</h3>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table" id="table-load-report">
+              <thead>
+                <tr>
+                  <th>Ciclista</th>
+                  <th>CTL (Fitness)</th>
+                  <th>ATL (Fatiga)</th>
+                  <th>TSB (Forma)</th>
+                  <th>Ramp Rate</th>
+                  <th>TSS Semanal Promedio</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-load-report">
+                <tr><td colspan="6" style="text-align: center; color: var(--text-dim);">Datos de carga pendientes de consulta.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           PESTAÑA 4: RÉCORDS Y FATIGA (SEASON BESTS + kJ)
+           =================================================================== -->
+      <section id="tab-records" class="tab-view">
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>🏆</span> Mejores Números de la Temporada con Gasto Previo (Fatiga)</h2>
+            <div style="display: flex; gap: 10px; align-items: center;">
+              <label style="font-size: 0.85rem; color: var(--text-muted); display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                <input type="checkbox" id="toggle-fatigue-comparison" style="accent-color: var(--accent-cyan);">
+                <span>Ver Comparativa Fresco (<2000 kJ) vs Fatiga (≥2000 kJ)</span>
+              </label>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; align-items: flex-end;">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Seleccionar Ciclista</label>
+              <select id="records-select-athlete" class="form-control">
+                <!-- Se llena dinámicamente -->
+              </select>
+            </div>
+
+            <div class="form-group" style="margin-bottom: 0;">
+              <label class="form-label">Temporada</label>
+              <select id="records-select-season" class="form-control">
+                <option value="2026" selected>Temporada 2026</option>
+                <option value="2025">Temporada 2025</option>
+                <option value="">Todo el Histórico</option>
+              </select>
+            </div>
+
+            <button class="btn btn-primary" id="btn-load-records">
+              <span>🔍</span> Consultar Mejores Marcas
+            </button>
+          </div>
+        </div>
+
+        <!-- Gráfico Curva MMP Interactivo -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title"><span>📉</span> Curva de Potencia Máxima (Power-Duration Curve)</h3>
+            <span id="records-chart-subtitle" style="font-size: 0.85rem; color: var(--accent-cyan); font-weight: 600;"></span>
+          </div>
+          <div style="height: 380px; position: relative;">
+            <canvas id="chart-mmp-curve"></canvas>
+          </div>
+        </div>
+
+        <!-- Tabla Detallada con Kilojulios -->
+        <div class="panel">
+          <div class="panel-header">
+            <h3 class="panel-title"><span>⚡</span> Desglose de Récords y Energía Previa Acumulada</h3>
+          </div>
+          <div class="table-responsive">
+            <table class="data-table" id="table-season-records">
+              <thead>
+                <tr>
+                  <th>Duración</th>
+                  <th>Vatios (W)</th>
+                  <th>W/kg</th>
+                  <th>kJ Previos (Fatiga)</th>
+                  <th>kJ/kg Prev.</th>
+                  <th>kJ Esfuerzo</th>
+                  <th>kJ Totales</th>
+                  <th>Momento (hh:mm:ss)</th>
+                  <th>Fecha</th>
+                  <th>Carrera / Actividad</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-season-records">
+                <tr><td colspan="10" style="text-align: center; color: var(--text-dim);">Selecciona un ciclista para ver sus mejores datos.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           PESTAÑA 5: ADMINISTRACIÓN DE EQUIPO Y CARRERAS
+           =================================================================== -->
+      <section id="tab-admin" class="tab-view">
+        <!-- Tarjeta de Gestión de Ciclistas -->
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>👥</span> Directorio y Gestión de Ciclistas del Equipo</h2>
+            <button class="btn btn-primary btn-sm" id="btn-open-add-athlete-modal">
+              <span>➕</span> Dar de Alta Ciclista
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Intervals ID</th>
+                  <th>Peso (kg)</th>
+                  <th>FTP (W)</th>
+                  <th>Biela (mm)</th>
+                  <th>Competición Asignada</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-athletes-admin">
+                <!-- Se llena dinámicamente -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Calendario de Competiciones y Convocatorias Históricas -->
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title"><span>🏆</span> Calendario de Competiciones y Convocatorias</h2>
+              <p style="font-size: 0.84rem; color: var(--text-muted); margin: 4px 0 0 0;">
+                Histórico completo de carreras, rango de fechas y ciclistas convocados por competición.
+              </p>
+            </div>
+            <button class="btn btn-primary btn-sm" id="btn-open-create-race-modal">
+              <span>➕</span> Dar de Alta Carrera
+            </button>
+          </div>
+
+          <!-- Filtros de Estado -->
+          <div class="filter-pills">
+            <button class="filter-pill-btn active" data-race-filter="all">Todas</button>
+            <button class="filter-pill-btn" data-race-filter="en_curso">🟢 En Competición</button>
+            <button class="filter-pill-btn" data-race-filter="proxima">📅 Próximas</button>
+            <button class="filter-pill-btn" data-race-filter="finalizada">🏁 Finalizadas</button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table" id="table-races-admin">
+              <thead>
+                <tr>
+                  <th>Competición</th>
+                  <th>Categoría</th>
+                  <th>Fechas (Inicio - Fin)</th>
+                  <th>Estado</th>
+                  <th>Convocatoria de Ciclistas</th>
+                  <th>Etapas</th>
+                  <th>Dist. Total</th>
+                  <th>Gasto (kJ)</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-races-admin">
+                <!-- Se llena dinámicamente -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<!-- ===================================================================
+     MODAL: DAR DE ALTA / EDITAR CICLISTA
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-athlete">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3 class="panel-title" id="modal-athlete-title">Dar de Alta Ciclista</h3>
+      <button class="modal-close" id="btn-close-athlete-modal">&times;</button>
+    </div>
+    <form id="form-athlete">
+      <input type="hidden" id="form-athlete-is-edit" value="0">
+      
+      <div class="form-group">
+        <label class="form-label">Nombre y Apellidos</label>
+        <input type="text" id="form-athlete-name" class="form-control" required placeholder="Ej. Mario Aparicio">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">ID de Intervals.icu</label>
+        <input type="text" id="form-athlete-id" class="form-control" required placeholder="Ej. i554068">
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Peso (kg)</label>
+          <input type="number" step="0.5" id="form-athlete-weight" class="form-control" required value="70">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">FTP (W)</label>
+          <input type="number" id="form-athlete-ftp" class="form-control" required value="380">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Longitud Biela (mm)</label>
+          <input type="number" step="0.5" id="form-athlete-biela" class="form-control" required value="170">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Grupo Carrera</label>
+          <select id="form-athlete-carrera" class="form-control">
+            <option value="0">0 - Ninguna / Entreno</option>
+            <option value="1">1 - Carrera 1</option>
+            <option value="2">2 - Carrera 2</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-athlete-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="btn-submit-athlete">Guardar Ciclista</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===================================================================
+     MODAL: CONFIGURAR CARRERA ASIGNADA AL GRUPO
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-race-group-config">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h3 class="panel-title" id="modal-rg-title">Configurar Carrera del Grupo</h3>
+      <button class="modal-close" id="btn-close-rg-modal">&times;</button>
+    </div>
+    <form id="form-race-group-config">
+      <input type="hidden" id="form-rg-grupo-id" value="1">
+      
+      <div class="form-group">
+        <label class="form-label">Nombre de la Carrera / Competición</label>
+        <input type="text" id="form-rg-nombre" class="form-control" required placeholder="Ej. Vuelta a Burgos 2026">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Vincular a Carrera en Base de Datos (Opcional)</label>
+        <select id="form-rg-carrera-link" class="form-control">
+          <option value="">-- Autodetección automática por corredor --</option>
+        </select>
+        <small style="color: var(--text-dim); display: block; margin-top: 4px;">
+          Si seleccionas una carrera registrada, sus etapas y kilojulios se calcularán en vivo.
+        </small>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Categoría UCI</label>
+          <select id="form-rg-categoria" class="form-control">
+            <option value="UCI 2.Pro">UCI 2.Pro</option>
+            <option value="UCI 2.1">UCI 2.1</option>
+            <option value="UCI 2.2">UCI 2.2</option>
+            <option value="UCI 1.Pro">UCI 1.Pro</option>
+            <option value="UCI 1.1">UCI 1.1</option>
+            <option value="UCI WT">UCI WorldTour</option>
+            <option value="Copa España">Copa de España</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">País</label>
+          <input type="text" id="form-rg-pais" class="form-control" value="España" placeholder="Ej. España, Portugal, Francia">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Total de Etapas</label>
+          <input type="number" min="1" max="25" id="form-rg-total-etapas" class="form-control" value="5">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Etapa Actual Disputada</label>
+          <input type="number" min="0" max="25" id="form-rg-etapa-actual" class="form-control" value="1">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Fecha Inicio</label>
+          <input type="date" id="form-rg-fecha-inicio" class="form-control">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Fecha Fin</label>
+          <input type="date" id="form-rg-fecha-fin" class="form-control">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Notas / Objetivos del Equipo</label>
+        <textarea id="form-rg-notas" class="form-control" rows="2" placeholder="Ej. Luchar por la clasificación general con Carlos y cazar etapas con Eric."></textarea>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-rg-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="btn-submit-rg">Guardar Configuración</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===================================================================
+     MODAL: CONSULTA HISTÓRICO DE LA VUELTA (ETAPAS + DESGASTE + RESUMEN)
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-race-history">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <div>
+        <h3 class="panel-title" id="modal-rh-title" style="margin-bottom: 4px;">
+          <span>📊</span> Histórico de la Vuelta
+        </h3>
+        <p id="modal-rh-subtitle" style="font-size: 0.85rem; color: var(--text-muted); margin: 0;">
+          Evolución etapa a etapa, desgaste energético acumulado y balance final del equipo.
+        </p>
+      </div>
+      <button class="modal-close" id="btn-close-rh-modal">&times;</button>
+    </div>
+
+    <!-- Navegación de Pestañas del Modal -->
+    <div class="modal-tab-nav">
+      <button class="modal-tab-btn active" data-modal-tab="rh-tab-stages">
+        <span>📅</span> Evolución Etapa a Etapa
+      </button>
+      <button class="modal-tab-btn" data-modal-tab="rh-tab-chart">
+        <span>📈</span> Curva de Desgaste Acumulado (kJ)
+      </button>
+      <button class="modal-tab-btn" data-modal-tab="rh-tab-summary">
+        <span>🏆</span> Balance Final del Equipo
+      </button>
+    </div>
+
+    <div class="modal-body-scroll">
+      <!-- VISTA 1: TABLA ETAPA A ETAPA -->
+      <div id="rh-tab-stages" class="rh-modal-tab-content">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <label class="form-label" style="margin-bottom: 0;">Filtrar Ciclista:</label>
+            <select id="select-rh-rider-filter" class="form-control" style="width: 220px;">
+              <option value="">Todos los Ciclistas</option>
+            </select>
+          </div>
+          <div id="rh-stages-badge-count" style="font-size: 0.85rem; color: var(--text-dim);">0 registros</div>
+        </div>
+
+        <div class="table-responsive">
+          <table class="data-table" id="table-rh-stages">
+            <thead>
+              <tr>
+                <th>Ciclista</th>
+                <th>Etapa</th>
+                <th>Fecha</th>
+                <th>Distancia</th>
+                <th>Tiempo</th>
+                <th>Pot Med</th>
+                <th>NP (W)</th>
+                <th>kJ Etapa</th>
+                <th style="color: var(--accent-cyan);">⚡ kJ Acum</th>
+                <th>TSS</th>
+                <th style="color: var(--accent-amber);">TSS Acum</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-rh-stages">
+              <tr><td colspan="11" style="text-align: center; color: var(--text-dim);">Cargando etapas...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- VISTA 2: GRÁFICO DE DESGASTE ACUMULADO -->
+      <div id="rh-tab-chart" class="rh-modal-tab-content" style="display: none;">
+        <div style="margin-bottom: 12px; color: var(--text-muted); font-size: 0.88rem;">
+          Comparativa de kilojulios acumulados (trabajo metabólico) etapa tras etapa entre los corredores del equipo:
+        </div>
+        <div style="height: 380px; position: relative;">
+          <canvas id="chart-rh-accumulated"></canvas>
+        </div>
+      </div>
+
+      <!-- VISTA 3: BALANCE FINAL CONSOLIDADO -->
+      <div id="rh-tab-summary" class="rh-modal-tab-content" style="display: none;">
+        <div style="margin-bottom: 12px; color: var(--text-muted); font-size: 0.88rem;">
+          Clasificación y balance general de la vuelta para el equipo al completar todas las etapas:
+        </div>
+        <div class="table-responsive">
+          <table class="data-table" id="table-rh-summary">
+            <thead>
+              <tr>
+                <th>Ciclista</th>
+                <th>Etapas Disputadas</th>
+                <th>Distancia Total</th>
+                <th>Desnivel Total</th>
+                <th>Horas de Competición</th>
+                <th style="color: var(--accent-cyan);">Gasto Total (kJ)</th>
+                <th>kJ/kg Total</th>
+                <th>Media kJ/kg/h</th>
+                <th style="color: var(--accent-rose);">TSS Total</th>
+                <th>NP Media</th>
+                <th>IF Medio</th>
+              </tr>
+            </thead>
+            <tbody id="tbody-rh-summary">
+              <tr><td colspan="11" style="text-align: center; color: var(--text-dim);">Cargando balance final...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border-subtle);">
+      <button type="button" class="btn btn-secondary" id="btn-close-rh-modal-footer">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================================================================
+     MODAL: DAR DE ALTA / EDITAR CARRERA Y CONVOCATORIA
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-race-form">
+  <div class="modal-card modal-card-wide">
+    <div class="modal-header">
+      <div>
+        <h3 class="panel-title" id="modal-rf-title">Dar de Alta Carrera</h3>
+        <p id="modal-rf-subtitle" style="font-size: 0.85rem; color: var(--text-muted); margin: 0;">
+          Configura las fechas de competición, categoría y la nómina de ciclistas convocados.
+        </p>
+      </div>
+      <button class="modal-close" id="btn-close-rf-modal">&times;</button>
+    </div>
+    <form id="form-race-crud">
+      <input type="hidden" id="form-rf-carrera-id" value="">
+      
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Nombre de la Competición</label>
+          <input type="text" id="form-rf-nombre" class="form-control" required placeholder="Ej. Volta ao Algarve 2026">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Identificador (Opcional)</label>
+          <input type="text" id="form-rf-slug" class="form-control" placeholder="Autogenerado ej. volta_ao_algarve">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Categoría UCI</label>
+          <select id="form-rf-categoria" class="form-control">
+            <option value="UCI 2.Pro">UCI 2.Pro</option>
+            <option value="UCI 2.1">UCI 2.1</option>
+            <option value="UCI 2.2">UCI 2.2</option>
+            <option value="UCI 1.Pro">UCI 1.Pro</option>
+            <option value="UCI 1.1">UCI 1.1</option>
+            <option value="UCI WT">UCI WorldTour</option>
+            <option value="Copa España">Copa de España</option>
+            <option value="Nacional">Nacional / Regional</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">País</label>
+          <input type="text" id="form-rf-pais" class="form-control" value="España" placeholder="Ej. España, Portugal, Francia">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Número de Etapas</label>
+          <input type="number" min="1" max="25" id="form-rf-etapas" class="form-control" value="5">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px;">
+        <div class="form-group">
+          <label class="form-label">Fecha Inicio</label>
+          <input type="date" id="form-rf-fecha-inicio" class="form-control" required>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Fecha Fin</label>
+          <input type="date" id="form-rf-fecha-fin" class="form-control" required>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Etapa Actual Disputada</label>
+          <input type="number" min="0" max="25" id="form-rf-etapa-actual" class="form-control" value="0">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Notas / Objetivos Tácticos</label>
+        <textarea id="form-rf-notas" class="form-control" rows="2" placeholder="Ej. Bloque de contrarreloj y sprints con Mario Aparicio."></textarea>
+      </div>
+
+      <!-- SELECCIÓN DE CONVOCATORIA -->
+      <div class="form-group" style="margin-top: 16px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <label class="form-label" style="margin-bottom: 0;">Ciclistas Convocados para esta Carrera</label>
+          <span id="rf-convocados-count" style="font-size: 0.82rem; color: var(--accent-cyan); font-weight: 600;">0 seleccionados</span>
+        </div>
+        <div class="convocados-checklist-grid" id="form-rf-athletes-checklist">
+          <!-- Checkboxes generados dinámicamente -->
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-rf-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary" id="btn-submit-rf">Guardar Carrera y Convocatoria</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ===================================================================
+     MODAL: GESTIÓN RÁPIDA DE CONVOCATORIA POR CARRERA
+     =================================================================== -->
+<div class="modal-backdrop" id="modal-convocatoria-quick">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h3 class="panel-title" id="modal-cq-title">Convocatoria de Carrera</h3>
+        <p id="modal-cq-subtitle" style="font-size: 0.85rem; color: var(--text-muted); margin: 0;">
+          Selecciona o ajusta los corredores convocados.
+        </p>
+      </div>
+      <button class="modal-close" id="btn-close-cq-modal">&times;</button>
+    </div>
+    <form id="form-convocatoria-quick">
+      <input type="hidden" id="form-cq-carrera-id" value="">
+      
+      <div class="form-group">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-size: 0.84rem; color: var(--text-muted);">Marcar corredores del equipo:</span>
+          <span id="cq-selected-count" style="font-size: 0.82rem; color: var(--accent-cyan); font-weight: 600;">0 ciclistas</span>
+        </div>
+        <div class="convocados-checklist-grid" id="cq-athletes-checklist">
+          <!-- Checkboxes generados dinámicamente -->
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px;">
+        <button type="button" class="btn btn-secondary" id="btn-cancel-cq-modal">Cancelar</button>
+        <button type="submit" class="btn btn-primary">Guardar Convocatoria</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- CONTENEDOR DE TOAST NOTIFICATIONS -->
+<div id="toast-container"></div>
+
+<!-- SCRIPTS DE LA APLICACIÓN -->
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>

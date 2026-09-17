@@ -53,6 +53,12 @@ from src.power_peaks import (
     obtener_curvas_referencia_atleta,
     comparar_curva_actividad_con_referencia,
 )
+from src.history_manager import (
+    guardar_resumen_etapa,
+    guardar_wellness_diario,
+    resolver_carrera,
+    obtener_carreras_activas_fecha,
+)
 
 # Paleta de colores distintiva para ciclistas (estilo Pro Cycling)
 COLORES_CICLISTAS = [
@@ -8112,7 +8118,7 @@ def sincronizar_ciclistas_ultimo_punto_comun(
 
 
 def generar_dashboard_perfil_interactivo(
-    archivos_o_datos: List[Union[str, Path, Dict[str, Any]]],
+    archivos_o_datos: Optional[List[Union[str, Path, Dict[str, Any]]]] = None,
     roster_df: Optional[pd.DataFrame] = None,
     client: Optional[IntervalsClient] = None,
     solo_carrera: bool = True,
@@ -8125,12 +8131,23 @@ def generar_dashboard_perfil_interactivo(
     output_docx: Optional[Union[str, Path]] = None,
     generar_docx: bool = False,
     formato_informe: str = 'pdf',
-    fits_temporales_limpiar: Optional[List[Union[str, Path]]] = None
+    fits_temporales_limpiar: Optional[List[Union[str, Path]]] = None,
+    guardar_en_db: bool = True,
+    carrera_id: Optional[str] = None,
+    etapa_num: Optional[int] = None,
+    fit_files: Optional[List[Union[str, Path, Dict[str, Any]]]] = None,
+    formato: Optional[str] = None,
+    **kwargs: Any
 ) -> Path:
     """
     Función principal para procesar los archivos FIT / datos con posicionamiento y generar
     el informe interactivo HTML completo, sincronizado desde el primer punto común.
     """
+    if archivos_o_datos is None:
+        archivos_o_datos = fit_files or []
+    if formato is not None:
+        formato_informe = formato
+
     formato_lower = str(formato_informe).lower().strip()
     debe_generar_docx = generar_docx or (formato_lower in ['docx', 'ambos', 'word'])
     debe_generar_pdf = (generar_pdf and formato_lower not in ['docx', 'word', 'ninguno']) or (formato_lower in ['ambos', 'pdf'])
@@ -8142,6 +8159,14 @@ def generar_dashboard_perfil_interactivo(
 
     nombres_ftp_map = dict(zip(roster_df['Name'], roster_df['FTP'])) if not roster_df.empty and 'FTP' in roster_df.columns else {}
     nombres_biela_map = dict(zip(roster_df['Name'], roster_df['crank_length_m'])) if not roster_df.empty and 'crank_length_m' in roster_df.columns else {}
+
+    # Resolver metadatos de carrera y convocatorias
+    carrera_info = resolver_carrera(carrera_id or grupo_carrera)
+    convocados_carrera_ids = set()
+    convocados_carrera_nombres = set()
+    if carrera_info and carrera_info.get('convocados'):
+        convocados_carrera_ids = {str(c['atleta_id']).strip() for c in carrera_info['convocados'] if c.get('atleta_id')}
+        convocados_carrera_nombres = {str(c['nombre']).strip() for c in carrera_info['convocados'] if c.get('nombre')}
 
     # Identificar IDs que tienen carrera > 0 (cualquier grupo de competición)
     ids_carrera = set()
@@ -8166,11 +8191,15 @@ def generar_dashboard_perfil_interactivo(
             es_carrera = meta.get('carrera', 1 if (aid in ids_carrera or nombre in nombres_carrera) else 0)
 
             # Filtrar si solo_carrera está activo y no pertenece a ningún grupo de carrera
-            if solo_carrera and ids_carrera:
+            if solo_carrera and ids_carrera and not convocados_carrera_ids:
                 if aid not in ids_carrera and nombre not in nombres_carrera and int(es_carrera) <= 0:
                     continue
+            # Filtrar por convocatoria de carrera si existe
+            if convocados_carrera_ids:
+                if aid not in convocados_carrera_ids and nombre not in convocados_carrera_nombres:
+                    continue
             # Filtrar por grupo específico de carrera (carrera=0 siempre excluido)
-            if grupo_carrera is not None and int(es_carrera) != grupo_carrera:
+            elif grupo_carrera is not None and int(es_carrera) != grupo_carrera:
                 continue
 
             # Opción 2: Cargar FIT con filtrado de paradas y cálculo de tiempo en movimiento
@@ -8191,11 +8220,13 @@ def generar_dashboard_perfil_interactivo(
             aid = str(item.get('atleta_id', '')).strip()
             es_carrera = item.get('carrera', 1 if (aid in ids_carrera or nombre in nombres_carrera) else 0)
 
-            if solo_carrera and ids_carrera:
+            if solo_carrera and ids_carrera and not convocados_carrera_ids:
                 if aid not in ids_carrera and nombre not in nombres_carrera and int(es_carrera) <= 0:
                     continue
-            # Filtrar por grupo específico de carrera (carrera=0 siempre excluido)
-            if grupo_carrera is not None and int(es_carrera) != grupo_carrera:
+            if convocados_carrera_ids:
+                if aid not in convocados_carrera_ids and nombre not in convocados_carrera_nombres:
+                    continue
+            elif grupo_carrera is not None and int(es_carrera) != grupo_carrera:
                 continue
         else:
             continue
@@ -8584,8 +8615,17 @@ def generar_dashboard_perfil_interactivo(
         }
 
     # Generar HTML
-    _grupo_label = f" | Carrera {grupo_carrera}" if grupo_carrera is not None else ""
-    titulo_final = titulo or f"Etapa {etapa_info['distancia_total_km']} km (+{etapa_info['desnivel_pos_m']}m D+){_grupo_label} | Perfil Sincronizado"
+    if carrera_info:
+        _carrera_label = f" | {carrera_info['nombre_carrera']}"
+        _slug_sufijo = carrera_info['carrera_id']
+    elif grupo_carrera is not None:
+        _carrera_label = f" | Carrera {grupo_carrera}"
+        _slug_sufijo = f"carrera_{grupo_carrera}"
+    else:
+        _carrera_label = ""
+        _slug_sufijo = ""
+
+    titulo_final = titulo or f"Etapa {etapa_info['distancia_total_km']} km (+{etapa_info['desnivel_pos_m']}m D+){_carrera_label} | Perfil Sincronizado"
     subtitulo_final = ""
     html_content = generar_html_dashboard_interactivo(
         etapa_info=etapa_info,
@@ -8601,8 +8641,7 @@ def generar_dashboard_perfil_interactivo(
     _titulo_slug = re.sub(r'_+', '_', _titulo_slug).strip('_')          # colapsar _ dobles
     _titulo_slug = _titulo_slug[:60]                                      # limitar longitud
 
-    #_carrera_suffix = f"_carrera_{grupo_carrera}" if grupo_carrera is not None else ""
-    _titulo_part = f"_{_titulo_slug}" if _titulo_slug else ""
+    _titulo_part = f"_{_slug_sufijo}" if _slug_sufijo else (f"_{_titulo_slug}" if _titulo_slug else "")
     out_path = Path(output_html or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.html"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     
@@ -8640,6 +8679,37 @@ def generar_dashboard_perfil_interactivo(
             print(f"✅ ¡Documento Word generado con éxito! Archivo: {ruta_docx.resolve()}")
         except Exception as e:
             print(f"⚠️ No se pudo generar el documento Word: {e}")
+
+    # Persistencia automática en base de datos SQLite histórica
+    if guardar_en_db and ciclistas_proc:
+        try:
+            carrera_id_res = (carrera_info['carrera_id'] if carrera_info else None) or carrera_id or (f"carrera_{grupo_carrera}" if grupo_carrera else "carrera")
+            nom_carrera_db = (carrera_info['nombre_carrera'] if carrera_info else None) or titulo_final
+            etapa_num_res = etapa_num or 1
+            if not etapa_num and titulo_final:
+                match_etapa = re.search(r'etapa\s*(\d+)', str(titulo_final), re.IGNORECASE)
+                if match_etapa:
+                    etapa_num_res = int(match_etapa.group(1))
+
+            guardados_cnt = 0
+            for c in ciclistas_proc:
+                if 'stats' in c:
+                    guardar_resumen_etapa(
+                        stats=c['stats'],
+                        carrera_id=carrera_id_res,
+                        etapa_num=etapa_num_res,
+                        fecha=fecha_etapa,
+                        nombre_carrera=nom_carrera_db
+                    )
+                    aid = str(c['stats'].get('atleta_id', '')).strip()
+                    if c.get('wellness_load') and aid:
+                        guardar_wellness_diario(atleta_id=aid, fecha=fecha_etapa, wellness_data=c['wellness_load'])
+                    guardados_cnt += 1
+
+            if guardados_cnt > 0:
+                print(f"💾 Guardados métricas de rendimiento y gasto de {guardados_cnt} ciclistas en base de datos histórica.")
+        except Exception as e:
+            print(f"⚠️ Error al persistir en base de datos histórica: {e}")
 
     # Limpieza automática de archivos FIT temporales de la API (las actividades no-Strava)
     if fits_temporales_limpiar:
@@ -8732,6 +8802,11 @@ def descargar_o_recopilar_fits_etapa(
     ultima_individual: bool = False,
     solo_carrera: bool = True,
     cache_dir: Optional[Union[str, Path]] = None,
+    fecha: Optional[str] = None,
+    grupo_carrera: Optional[Union[int, str]] = None,
+    carrera_id: Optional[str] = None,
+    todos: Optional[bool] = None,
+    **kwargs: Any,
 ) -> Tuple[List[Union[Path, Dict[str, Any]]], List[Path]]:
     """
     Recopila los datos de telemetría de los ciclistas para la etapa:
@@ -8742,7 +8817,23 @@ def descargar_o_recopilar_fits_etapa(
     
     Devuelve: (elementos_encontrados, fits_temporales_no_strava)
     """
+    fecha_str = fecha_str or fecha
+    if todos is not None:
+        solo_carrera = not todos
+
     roster_df = roster_df if roster_df is not None else cargar_roster()
+
+    carrera_info = resolver_carrera(carrera_id or grupo_carrera, fecha=fecha_str)
+    if carrera_info and carrera_info.get('convocados'):
+        conv_ids = {str(c['atleta_id']).strip() for c in carrera_info['convocados'] if c.get('atleta_id')}
+        if conv_ids and not roster_df.empty and 'intervals_id' in roster_df.columns:
+            roster_df = roster_df[roster_df['intervals_id'].astype(str).str.strip().isin(conv_ids)]
+    elif grupo_carrera is not None and not roster_df.empty and 'carrera' in roster_df.columns:
+        try:
+            roster_df = roster_df[roster_df['carrera'] == int(grupo_carrera)]
+        except (ValueError, TypeError):
+            pass
+
     cache_path = Path(cache_dir or "data/today_race")
     cache_path.mkdir(parents=True, exist_ok=True)
 
