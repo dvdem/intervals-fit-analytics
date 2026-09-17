@@ -160,6 +160,8 @@ switch ($Action) {
             --exclude="*.zip" `
             --exclude="*.exe" `
             --exclude="*.tar.gz" `
+            --exclude="*.db-wal" `
+            --exclude="*.db-shm" `
             --exclude="output/*" `
             --exclude="logs/*" `
             -C $PSScriptRoot .
@@ -187,9 +189,9 @@ switch ($Action) {
         }
         Remove-Item -Force $BundleFile
 
-        # Descomprimir en destino y asignar permisos
+        # Descomprimir en destino y asignar permisos con respaldo previo de base de datos
         Write-Host "Extrayendo codigo en $RemoteDir..." -ForegroundColor Cyan
-        $ExtractScript = "sudo mkdir -p $RemoteDir && sudo tar -xzf /tmp/deploy_bundle.tar.gz -C $RemoteDir && sudo rm -f /tmp/deploy_bundle.tar.gz && sudo chown -R ${User}:${User} $RemoteDir && sudo chmod +x $RemoteDir/deploy/*.sh"
+        $ExtractScript = "sudo mkdir -p $RemoteDir/data && sudo cp -a $RemoteDir/data/historico_equipo.db $RemoteDir/data/historico_equipo.db.bak 2>/dev/null || true; sudo tar -xzf /tmp/deploy_bundle.tar.gz -C $RemoteDir && sudo rm -f /tmp/deploy_bundle.tar.gz && sudo chown -R ${User}:${User} $RemoteDir && sudo chmod -R u+rwX,g+rwX $RemoteDir && sudo chmod +x $RemoteDir/deploy/*.sh"
         $Cmd = $SshArgs + @($RemoteTarget, $ExtractScript)
         & ssh @Cmd
 
@@ -201,7 +203,7 @@ switch ($Action) {
         }
         else {
             Write-Host "Actualizando dependencias de Python y reiniciando servicio..." -ForegroundColor Yellow
-            $UpdateScript = "cd $RemoteDir && if [ -d .venv ]; then .venv/bin/pip install --quiet --upgrade -r requirements.txt; fi && sudo systemctl restart intervals-web && sudo systemctl is-active intervals-web"
+            $UpdateScript = "cd $RemoteDir && if [ -d .venv ]; then .venv/bin/pip install --quiet --upgrade -r requirements.txt; fi && sudo systemctl daemon-reload && sudo systemctl restart intervals-web && sudo systemctl is-active intervals-web"
             $Cmd = $SshArgs + @($RemoteTarget, $UpdateScript)
             & ssh @Cmd
         }
