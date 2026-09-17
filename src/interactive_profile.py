@@ -8824,25 +8824,20 @@ def descargar_o_recopilar_fits_etapa(
     roster_df = roster_df if roster_df is not None else cargar_roster()
 
     carrera_info = resolver_carrera(carrera_id or grupo_carrera, fecha=fecha_str)
+    conv_ids = set()
     if carrera_info and carrera_info.get('convocados'):
         conv_ids = {str(c['atleta_id']).strip() for c in carrera_info['convocados'] if c.get('atleta_id')}
         if conv_ids and not roster_df.empty and 'intervals_id' in roster_df.columns:
             roster_df = roster_df[roster_df['intervals_id'].astype(str).str.strip().isin(conv_ids)]
-    elif grupo_carrera is not None and not roster_df.empty and 'carrera' in roster_df.columns:
-        try:
-            roster_df = roster_df[roster_df['carrera'] == int(grupo_carrera)]
-        except (ValueError, TypeError):
-            pass
 
     cache_path = Path(cache_dir or "data/today_race")
     cache_path.mkdir(parents=True, exist_ok=True)
 
     pesos_map = dict(zip(roster_df['intervals_id'], roster_df['weight'])) if not roster_df.empty and 'weight' in roster_df.columns else {}
     ftp_map = dict(zip(roster_df['intervals_id'], roster_df['FTP'])) if not roster_df.empty and 'FTP' in roster_df.columns else {}
-    ids_carrera = set(roster_df.loc[roster_df['carrera'] > 0, 'intervals_id'].astype(str).str.strip()) if not roster_df.empty and 'carrera' in roster_df.columns else set()
-    nombres_carrera = set(roster_df.loc[roster_df['carrera'] > 0, 'Name'].astype(str).str.strip()) if not roster_df.empty and 'carrera' in roster_df.columns else set()
-    # Mapa completo intervals_id → número de grupo real (1, 2, …) para anotar correctamente cada item
-    carrera_map = dict(zip(roster_df['intervals_id'].astype(str).str.strip(), roster_df['carrera'].astype(int))) if not roster_df.empty and 'carrera' in roster_df.columns else {}
+    ids_carrera = conv_ids if conv_ids else (set(roster_df['intervals_id'].astype(str).str.strip()) if not roster_df.empty and 'intervals_id' in roster_df.columns else set())
+    nombres_carrera = set(roster_df['Name'].astype(str).str.strip()) if not roster_df.empty and 'Name' in roster_df.columns else set()
+    carrera_map = {aid: 1 for aid in ids_carrera}
 
     if client is None:
         try:

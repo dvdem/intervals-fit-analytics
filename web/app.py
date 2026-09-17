@@ -163,16 +163,16 @@ class AthleteCreate(BaseModel):
     intervals_id: str = Field(..., example="i554068")
     weight: float = Field(70.0, example=71.0)
     ftp: float = Field(380.0, example=440.0)
-    carrera: int = Field(0, example=1)
     biela: float = Field(170.0, example=172.5)
+    carrera: Optional[int] = None
 
 
 class AthleteUpdate(BaseModel):
     name: Optional[str] = None
     weight: Optional[float] = None
     ftp: Optional[float] = None
-    carrera: Optional[int] = None
     biela: Optional[float] = None
+    carrera: Optional[int] = None
 
 
 class RaceAssign(BaseModel):
@@ -615,7 +615,6 @@ def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_use
                 "intervals_id": str(row.get('intervals_id', '')),
                 "weight": float(row.get('weight', 70.0)),
                 "ftp": float(row.get('FTP', 380.0)),
-                "carrera": int(row.get('carrera', 0)),
                 "biela": float(row.get('biela', 170.0))
             })
 
@@ -625,23 +624,6 @@ def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_use
     carreras_finalizadas = [c for c in carreras_calendario if c['estado'] == 'finalizada']
     proxima_carrera = carreras_proximas[0] if carreras_proximas else None
     ultima_carrera = carreras_finalizadas[0] if carreras_finalizadas else None
-
-    # Ciclistas activos en carrera según CSV o convocatorias
-    en_carrera_1 = [c for c in ciclistas if c['carrera'] == 1]
-    en_carrera_2 = [c for c in ciclistas if c['carrera'] == 2]
-
-    # Configuración de los grupos de carrera y cálculo de métricas (compatibilidad)
-    configs_list = obtener_config_grupos_carrera()
-    configs = {c["grupo_id"]: c for c in configs_list}
-    grupo_1_info = _calcular_metricas_grupo_carrera(1, configs.get(1, {}), en_carrera_1)
-    grupo_2_info = _calcular_metricas_grupo_carrera(2, configs.get(2, {}), en_carrera_2)
-
-    # Si hay carreras activas en el calendario, asociarlas directamente a grupo 1 y 2
-    if len(carreras_activas) >= 1:
-        grupo_1_info["carrera_id_link"] = carreras_activas[0]["carrera_id"]
-        grupo_1_info["nombre_carrera"] = carreras_activas[0]["nombre_carrera"]
-    if len(carreras_activas) >= 2:
-        grupo_2_info["carrera_id_link"] = carreras_activas[1]["carrera_id"]
     # Obtener ultimas etapas registradas
     ultimas_etapas = []
     try:
@@ -669,17 +651,11 @@ def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_use
     return {
         "db_stats": db_stats,
         "total_ciclistas": len(ciclistas),
-        "en_carrera_1": en_carrera_1,
-        "en_carrera_2": en_carrera_2,
+        "ciclistas": ciclistas,
         "carreras_activas": carreras_activas,
         "proxima_carrera": proxima_carrera,
         "ultima_carrera": ultima_carrera,
         "total_carreras": len(carreras_calendario),
-        "grupos": {
-            "1": grupo_1_info,
-            "2": grupo_2_info
-        },
-        "ciclistas": ciclistas,
         "ultimas_etapas": ultimas_etapas,
         "sync_status": _SYNC_STATUS
     }
@@ -692,7 +668,9 @@ def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_use
 def _guardar_roster_csv(df: pd.DataFrame):
     """Escribe de vuelta el roster respetando el formato CSV nativo con delimitador punto y coma."""
     DEFAULT_ROSTER_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df_clean = df[['Name', 'intervals_id', 'weight', 'FTP', 'carrera', 'biela']].copy()
+    cols = ['Name', 'intervals_id', 'weight', 'FTP', 'biela']
+    available_cols = [c for c in cols if c in df.columns]
+    df_clean = df[available_cols].copy()
     df_clean.to_csv(DEFAULT_ROSTER_PATH, sep=';', index=False, encoding='utf-8')
 
 
@@ -709,7 +687,6 @@ def list_athletes(current_user: Dict[str, Any] = Depends(get_current_user)):
             "intervals_id": str(row.get('intervals_id', '')),
             "weight": float(row.get('weight', 70.0)),
             "ftp": float(row.get('FTP', 380.0)),
-            "carrera": int(row.get('carrera', 0)),
             "biela": float(row.get('biela', 170.0)),
             "crank_length_m": float(row.get('crank_length_m', 0.170))
         })
@@ -743,7 +720,6 @@ def create_athlete(athlete: AthleteCreate, current_user: Dict[str, Any] = Depend
         'intervals_id': aid,
         'weight': athlete.weight,
         'FTP': athlete.ftp,
-        'carrera': athlete.carrera,
         'biela': athlete.biela,
         'crank_length_m': crank_m
     }])
@@ -770,8 +746,6 @@ def update_athlete(athlete_id: str, athlete: AthleteUpdate, current_user: Dict[s
         df.at[idx, 'weight'] = float(athlete.weight)
     if athlete.ftp is not None:
         df.at[idx, 'FTP'] = float(athlete.ftp)
-    if athlete.carrera is not None:
-        df.at[idx, 'carrera'] = int(athlete.carrera)
     if athlete.biela is not None:
         df.at[idx, 'biela'] = float(athlete.biela)
         df.at[idx, 'crank_length_m'] = normalizar_crank_length_m(athlete.biela)
@@ -1125,26 +1099,13 @@ def get_power_report_data(
     c_target = carrera_id or grupo
     c_res = resolver_carrera(c_target) if c_target is not None else None
 
-    solo_carrera = (c_target is not None)
-    atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
-
     if c_res is not None and c_res.get('convocados'):
         convocados_ids = {str(c['atleta_id']).strip() for c in c_res['convocados'] if c.get('atleta_id')}
-        filtrados = [a for a in atletas if str(a.get('athlete_id', '')).strip() in convocados_ids]
-        if filtrados:
-            atletas = filtrados
-        elif grupo is not None:
-            try:
-                g_num = int(grupo)
-                atletas = [a for a in atletas if int(a.get('carrera', 0)) == g_num]
-            except (ValueError, TypeError):
-                pass
-    elif grupo is not None:
-        try:
-            g_num = int(grupo)
-            atletas = [a for a in atletas if int(a.get('carrera', 0)) == g_num]
-        except (ValueError, TypeError):
-            pass
+        atletas = client.get_athletes_list(roster_df=roster_df, convocados_ids=convocados_ids)
+    elif c_target is not None:
+        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=True)
+    else:
+        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
 
     if not atletas:
         return {"atletas": [], "peaks_table": [], "metrics_table": [], "load_timeseries": []}
@@ -1358,29 +1319,16 @@ def export_power_report(payload: PowerReportExportRequest, current_user: Dict[st
     c_target = carrera_id or grupo
     c_res = resolver_carrera(c_target) if c_target is not None else None
 
-    solo_carrera = (c_target is not None)
-    atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
-
     if c_res is not None and c_res.get('convocados'):
         convocados_ids = {str(c['atleta_id']).strip() for c in c_res['convocados'] if c.get('atleta_id')}
-        filtrados = [a for a in atletas if str(a.get('athlete_id', '')).strip() in convocados_ids]
-        if filtrados:
-            atletas = filtrados
-        elif grupo is not None:
-            try:
-                g_num = int(grupo)
-                atletas = [a for a in atletas if int(a.get('carrera', 0)) == g_num]
-            except (ValueError, TypeError):
-                pass
-    elif grupo is not None:
-        try:
-            g_num = int(grupo)
-            atletas = [a for a in atletas if int(a.get('carrera', 0)) == g_num]
-        except (ValueError, TypeError):
-            pass
+        atletas = client.get_athletes_list(roster_df=roster_df, convocados_ids=convocados_ids)
+    elif c_target is not None:
+        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=True)
+    else:
+        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
 
     if not atletas:
-        raise HTTPException(status_code=400, detail="No hay atletas asignados a la carrera o grupo especificado.")
+        raise HTTPException(status_code=400, detail="No hay atletas convocados o registrados para la carrera especificada.")
 
     nombres_map = dict(zip(roster_df['intervals_id'], roster_df['Name'])) if not roster_df.empty else {}
     peaks_df_total = calcular_picos_potencia(
@@ -1404,11 +1352,6 @@ def export_power_report(payload: PowerReportExportRequest, current_user: Dict[st
         titulo = payload.titulo or f"Informe de Rendimiento - {c_res['nombre_carrera']}"
         c_id_param = c_res['carrera_id']
         c_nom_param = c_res['nombre_carrera']
-    elif grupo is not None:
-        label = f"_carrera_{grupo}"
-        titulo = payload.titulo or f"Informe de Rendimiento - Grupo Carrera {grupo}"
-        c_id_param = f"carrera_{grupo}"
-        c_nom_param = f"Grupo Carrera {grupo}"
     else:
         label = "_general"
         titulo = payload.titulo or "Informe de Rendimiento General"
@@ -1582,18 +1525,30 @@ def analyze_stage(payload: StageAnalyzeRequest, current_user: Dict[str, Any] = D
 # Endpoints de Sincronización y Descargas
 # =============================================================================
 
-def _run_background_sync(desde: str):
+def _run_background_sync(desde: str = "2026-01-01", solo_nuevas: bool = True):
     """Tarea ejecutada en segundo plano para sincronizar la base de datos."""
     global _SYNC_STATUS
     _SYNC_STATUS["running"] = True
-    _SYNC_STATUS["message"] = f"Sincronizando desde {desde}..."
+    if solo_nuevas:
+        _SYNC_STATUS["message"] = "Sincronizando actividades nuevas con Intervals.icu..."
+    else:
+        _SYNC_STATUS["message"] = f"Sincronizando histórico completo desde {desde}..."
     try:
         res = sincronizar_historico_desde_api(
             fecha_inicio=desde,
+            solo_nuevas=solo_nuevas,
             verbose=False
         )
         _SYNC_STATUS["running"] = False
-        _SYNC_STATUS["message"] = f"Sincronización completada: {res.get('total_actividades', 0)} actividades, {res.get('total_picos', 0)} picos guardados."
+        n_acts = res.get('total_actividades', 0)
+        n_picos = res.get('total_picos', 0)
+        if solo_nuevas:
+            if n_acts > 0:
+                _SYNC_STATUS["message"] = f"Sincronización completada: {n_acts} nueva(s) actividad(es) guardada(s), {n_picos} picos actualizados."
+            else:
+                _SYNC_STATUS["message"] = "Sincronización completada: El equipo está al día (0 actividades nuevas)."
+        else:
+            _SYNC_STATUS["message"] = f"Sincronización completada: {n_acts} actividades, {n_picos} picos guardados."
         _SYNC_STATUS["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     except Exception as e:
         _SYNC_STATUS["running"] = False
@@ -1601,14 +1556,20 @@ def _run_background_sync(desde: str):
 
 
 @app.post("/api/sync")
-def trigger_sync(background_tasks: BackgroundTasks, desde: str = Query("2026-01-01"), current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))):
-    """Inicia la sincronización masiva con Intervals.icu en segundo plano."""
+def trigger_sync(
+    background_tasks: BackgroundTasks,
+    solo_nuevas: bool = Query(True),
+    desde: str = Query("2026-01-01"),
+    current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR]))
+):
+    """Inicia la sincronización con Intervals.icu en segundo plano (por defecto solo actividades nuevas)."""
     global _SYNC_STATUS
     if _SYNC_STATUS["running"]:
         return {"status": "busy", "message": "Ya hay una sincronización en curso."}
 
-    background_tasks.add_task(_run_background_sync, desde=desde)
-    return {"status": "started", "message": f"Sincronización iniciada en segundo plano desde {desde}."}
+    background_tasks.add_task(_run_background_sync, desde=desde, solo_nuevas=solo_nuevas)
+    msg = "Sincronización de actividades nuevas iniciada en segundo plano." if solo_nuevas else f"Sincronización histórica iniciada en segundo plano desde {desde}."
+    return {"status": "started", "message": msg}
 
 
 @app.get("/api/sync/status")

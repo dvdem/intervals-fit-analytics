@@ -1483,11 +1483,16 @@ def sincronizar_historico_desde_api(
     client: Optional[Any] = None,
     incluir_wellness: bool = True,
     incluir_picos: bool = True,
-    verbose: bool = True
+    verbose: bool = True,
+    solo_nuevas: bool = False
 ) -> Dict[str, Any]:
     """
-    Descarga desde la API de Intervals.icu y almacena en SQLite todas las actividades,
-    curvas de potencia récord y métricas de bienestar de los ciclistas desde fecha_inicio.
+    Descarga desde la API de Intervals.icu y almacena en SQLite las actividades,
+    curvas de potencia récord y métricas de bienestar de los ciclistas.
+
+    :param solo_nuevas: Si es True, descarga únicamente actividades y métricas a partir del último
+                        registro en base de datos para cada ciclista, omitiendo re-descargas de
+                        actividades y cálculos de curvas si no hay actividades nuevas.
     """
     try:
         from config import cargar_roster, DEFAULT_ROSTER_PATH
@@ -1516,8 +1521,9 @@ def sincronizar_historico_desde_api(
     total_wellness = 0
     ciclistas_procesados = 0
 
+    modo_txt = "incremental (solo nuevas actividades)" if solo_nuevas else "completa"
     if verbose:
-        print(f"\n🚀 Iniciando sincronización histórica para {len(roster_df)} ciclistas ({fecha_inicio} -> {fecha_fin})...")
+        print(f"\n🚀 Iniciando sincronización [{modo_txt}] para {len(roster_df)} ciclistas ({fecha_inicio} -> {fecha_fin})...")
 
     for idx, (_, r) in enumerate(roster_df.iterrows(), 1):
         aid = str(r.get('intervals_id', '')).strip()
@@ -1540,20 +1546,46 @@ def sincronizar_historico_desde_api(
             db_path=path
         )
 
+        # Consultar estado previo del ciclista en SQLite
+        with _conectar_db(path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(fecha) FROM etapas_resumen WHERE atleta_id = ?", (aid,))
+            row_max = cur.fetchone()
+            max_fecha_act = row_max[0] if row_max and row_max[0] else None
+
+            cur.execute("SELECT actividad_id FROM etapas_resumen WHERE atleta_id = ?", (aid,))
+            existing_act_ids = set(str(r_id[0]).strip() for r_id in cur.fetchall() if r_id[0])
+
+            cur.execute("SELECT COUNT(*) FROM picos_historicos WHERE atleta_id = ?", (aid,))
+            picos_existentes_count = cur.fetchone()[0]
+
+            cur.execute("SELECT MAX(fecha) FROM wellness_diario WHERE atleta_id = ?", (aid,))
+            row_w = cur.fetchone()
+            max_fecha_wellness = row_w[0] if row_w and row_w[0] else None
+
+        fecha_act_oldest = max_fecha_act if (solo_nuevas and max_fecha_act) else fecha_inicio
+
         if verbose:
-            print(f"[{idx}/{len(roster_df)}] 🚴 Sincronizando {nom} ({aid})...")
+            tag_sync = "solo nuevas" if solo_nuevas else "completa"
+            print(f"[{idx}/{len(roster_df)}] 🚴 Sincronizando {nom} ({aid}) [{tag_sync}] desde {fecha_act_oldest}...")
 
         # 2. Descargar actividades del periodo
         try:
-            acts = client.get_activities(athlete_id=aid, oldest=fecha_inicio, newest=fecha_fin)
+            acts = client.get_activities(athlete_id=aid, oldest=fecha_act_oldest, newest=fecha_fin)
         except Exception as e:
             if verbose:
                 print(f"   ⚠️ Error al obtener actividades para {nom}: {e}")
             acts = []
 
+        # Si solo_nuevas es True, filtrar solo aquellas no presentes en base de datos
+        if solo_nuevas:
+            nuevas_acts = [act for act in acts if str(act.get('id', '')).strip() not in existing_act_ids]
+        else:
+            nuevas_acts = acts
+
         # Preparar registros para inserción en etapas_resumen
         registros_etapas = []
-        for act in acts:
+        for act in nuevas_acts:
             tipo = act.get('type', '')
             if tipo not in ['Ride', 'VirtualRide', 'EBikeRide', 'GravelRide', 'MountainBikeRide'] and not act.get('icu_joules') and not act.get('distance'):
                 continue
@@ -1626,32 +1658,41 @@ def sincronizar_historico_desde_api(
                 None, None, temp_med, None, None
             ))
 
-        with _conectar_db(path) as conn:
-            conn.executemany("""
-                INSERT OR REPLACE INTO etapas_resumen (
-                    actividad_id, atleta_id, nombre_ciclista, carrera_id, nombre_carrera,
-                    etapa_num, fecha, temporada, peso_kg, ftp_w, distancia_km, desnivel_m,
-                    tiempo_mov_s, duracion_bruta_s, vel_media_kmh, vel_max_kmh, pot_media_w,
-                    pot_max_w, np_w, kj_total, kj_kg, kj_kg_h, np_kj_kg_h, tss, tss_h,
-                    if_val, fc_media, fc_max, cadencia_media, torque_media_nm, aepf_media_n,
-                    temp_media_c, desglose_horas_json, metadata_json
-                ) VALUES (
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?
-                );
-            """, registros_etapas)
-            conn.commit()
+        if registros_etapas:
+            with _conectar_db(path) as conn:
+                conn.executemany("""
+                    INSERT OR REPLACE INTO etapas_resumen (
+                        actividad_id, atleta_id, nombre_ciclista, carrera_id, nombre_carrera,
+                        etapa_num, fecha, temporada, peso_kg, ftp_w, distancia_km, desnivel_m,
+                        tiempo_mov_s, duracion_bruta_s, vel_media_kmh, vel_max_kmh, pot_media_w,
+                        pot_max_w, np_w, kj_total, kj_kg, kj_kg_h, np_kj_kg_h, tss, tss_h,
+                        if_val, fc_media, fc_max, cadencia_media, torque_media_nm, aepf_media_n,
+                        temp_media_c, desglose_horas_json, metadata_json
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?
+                    );
+                """, registros_etapas)
+                conn.commit()
 
-        total_actividades += len(registros_etapas)
-        if verbose:
-            print(f"   • Guardadas {len(registros_etapas)} actividades.")
+            total_actividades += len(registros_etapas)
+            if verbose:
+                tag_act = "actividades nuevas" if solo_nuevas else "actividades"
+                print(f"   • Guardadas {len(registros_etapas)} {tag_act}.")
+        else:
+            if verbose:
+                if solo_nuevas:
+                    print(f"   • Sin actividades nuevas (al día).")
+                else:
+                    print(f"   • 0 actividades encontradas.")
 
         # 3. Descargar y almacenar curvas de potencia de la temporada
-        if incluir_picos:
+        debe_actualizar_picos = incluir_picos and (not solo_nuevas or len(registros_etapas) > 0 or picos_existentes_count == 0)
+        if debe_actualizar_picos:
             try:
                 date_curves_param = f"r.{fecha_inicio}.{fecha_fin}"
                 pc = client.get_athlete_power_curves(athlete_id=aid, date_curves=date_curves_param)
@@ -1752,11 +1793,14 @@ def sincronizar_historico_desde_api(
             except Exception as e:
                 if verbose:
                     print(f"   ⚠️ Error al procesar curvas de potencia para {nom}: {e}")
+        elif incluir_picos and verbose and solo_nuevas:
+            print(f"   • Curvas de potencia al día (sin actividades nuevas).")
 
         # 4. Descargar y almacenar datos de bienestar (Wellness / HRV)
         if incluir_wellness:
+            fecha_w_oldest = max_fecha_wellness if (solo_nuevas and max_fecha_wellness) else fecha_inicio
             try:
-                w_list = client.get_wellness(athlete_id=aid, oldest=fecha_inicio, newest=fecha_fin)
+                w_list = client.get_wellness(athlete_id=aid, oldest=fecha_w_oldest, newest=fecha_fin)
                 registros_wellness = []
                 for w in w_list:
                     f_w = str(w.get('id', '')).strip()
@@ -1774,26 +1818,27 @@ def sincronizar_historico_desde_api(
                         w.get('sleepScore')
                     ))
 
-                with _conectar_db(path) as conn:
-                    conn.executemany("""
-                        INSERT INTO wellness_diario (
-                            atleta_id, fecha, hrv_rmssd, fc_reposo, peso_kg, ctl, atl, tsb, sueno_horas, sueno_calidad
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(atleta_id, fecha) DO UPDATE SET
-                            hrv_rmssd = COALESCE(excluded.hrv_rmssd, wellness_diario.hrv_rmssd),
-                            fc_reposo = COALESCE(excluded.fc_reposo, wellness_diario.fc_reposo),
-                            peso_kg = COALESCE(excluded.peso_kg, wellness_diario.peso_kg),
-                            ctl = COALESCE(excluded.ctl, wellness_diario.ctl),
-                            atl = COALESCE(excluded.atl, wellness_diario.atl),
-                            tsb = COALESCE(excluded.tsb, wellness_diario.tsb),
-                            sueno_horas = COALESCE(excluded.sueno_horas, wellness_diario.sueno_horas),
-                            sueno_calidad = COALESCE(excluded.sueno_calidad, wellness_diario.sueno_calidad);
-                    """, registros_wellness)
-                    conn.commit()
+                if registros_wellness:
+                    with _conectar_db(path) as conn:
+                        conn.executemany("""
+                            INSERT INTO wellness_diario (
+                                atleta_id, fecha, hrv_rmssd, fc_reposo, peso_kg, ctl, atl, tsb, sueno_horas, sueno_calidad
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(atleta_id, fecha) DO UPDATE SET
+                                hrv_rmssd = COALESCE(excluded.hrv_rmssd, wellness_diario.hrv_rmssd),
+                                fc_reposo = COALESCE(excluded.fc_reposo, wellness_diario.fc_reposo),
+                                peso_kg = COALESCE(excluded.peso_kg, wellness_diario.peso_kg),
+                                ctl = COALESCE(excluded.ctl, wellness_diario.ctl),
+                                atl = COALESCE(excluded.atl, wellness_diario.atl),
+                                tsb = COALESCE(excluded.tsb, wellness_diario.tsb),
+                                sueno_horas = COALESCE(excluded.sueno_horas, wellness_diario.sueno_horas),
+                                sueno_calidad = COALESCE(excluded.sueno_calidad, wellness_diario.sueno_calidad);
+                        """, registros_wellness)
+                        conn.commit()
 
-                total_wellness += len(registros_wellness)
-                if verbose:
-                    print(f"   • Guardados {len(registros_wellness)} días de bienestar/HRV.")
+                    total_wellness += len(registros_wellness)
+                    if verbose:
+                        print(f"   • Guardados {len(registros_wellness)} días de bienestar/HRV.")
             except Exception as e:
                 if verbose:
                     print(f"   ⚠️ Error al procesar wellness para {nom}: {e}")
@@ -1803,11 +1848,13 @@ def sincronizar_historico_desde_api(
 
     db_stats = obtener_estadisticas_generales_bd(path)
     if verbose:
+        titulo_sync = "SINCRONIZACIÓN INCREMENTAL" if solo_nuevas else "SINCRONIZACIÓN HISTÓRICA"
         print("\n" + "=" * 60)
-        print("✅ ¡SINCRONIZACIÓN HISTÓRICA COMPLETADA CON ÉXITO!")
+        print(f"✅ ¡{titulo_sync} COMPLETADA CON ÉXITO!")
         print("=" * 60)
         print(f"   • Ciclistas procesados: {ciclistas_procesados}")
-        print(f"   • Actividades almacenadas: {total_actividades}")
+        tag_acts_tot = "Nuevas actividades almacenadas" if solo_nuevas else "Actividades almacenadas"
+        print(f"   • {tag_acts_tot}: {total_actividades}")
         print(f"   • Picos de potencia guardados: {total_picos}")
         print(f"   • Días de bienestar (HRV/Carga): {total_wellness}")
         print(f"   • Tamaño final de la base de datos: {db_stats.get('tamano_kb', 0)} KB ({db_stats.get('tamano_kb', 0)/1024.0:.2f} MB)")
@@ -1818,5 +1865,6 @@ def sincronizar_historico_desde_api(
         "total_actividades": total_actividades,
         "total_picos": total_picos,
         "total_wellness": total_wellness,
-        "db_stats": db_stats
+        "db_stats": db_stats,
+        "solo_nuevas": solo_nuevas
     }

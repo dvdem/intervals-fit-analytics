@@ -118,7 +118,7 @@ def normalizar_crank_length_m(val: Any) -> float:
 def cargar_roster(ruta_csv: Path | str = None) -> pd.DataFrame:
     """
     Carga el archivo CSV de metadatos de los ciclistas (ej. burgos.csv).
-    Garantiza columnas estándar: Name, intervals_id, weight, FTP, carrera, biela, crank_length_m.
+    Garantiza columnas estándar: Name, intervals_id, weight, FTP, biela, crank_length_m.
     """
     if ruta_csv is None:
         ruta_csv = DEFAULT_ROSTER_PATH
@@ -126,7 +126,7 @@ def cargar_roster(ruta_csv: Path | str = None) -> pd.DataFrame:
     ruta = Path(ruta_csv)
     if not ruta.exists():
         # Retornar dataframe vacío si no existe
-        return pd.DataFrame(columns=["Name", "intervals_id", "weight", "FTP", "carrera", "biela", "crank_length_m"])
+        return pd.DataFrame(columns=["Name", "intervals_id", "weight", "FTP", "biela", "crank_length_m"])
     
     try:
         # Detectar delimitador (; o ,)
@@ -142,8 +142,6 @@ def cargar_roster(ruta_csv: Path | str = None) -> pd.DataFrame:
         df['weight'] = pd.to_numeric(df['weight'], errors='coerce')
     if 'FTP' in df.columns:
         df['FTP'] = pd.to_numeric(df['FTP'], errors='coerce')
-    if 'carrera' in df.columns:
-        df['carrera'] = pd.to_numeric(df['carrera'], errors='coerce').fillna(0).astype(int)
 
     # Buscar columna de bielas / biela (en mm)
     col_biela = None

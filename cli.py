@@ -104,45 +104,57 @@ def cmd_power_report(args):
         except (ValueError, TypeError):
             es_numero = False
 
-        atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
-
-        if es_numero:
-            grupos_carrera = [g_num]
-            atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == g_num]
-            c_nom = carrera_res['nombre_carrera'] if carrera_res else f"Carrera {g_num}"
-            print(f"\n📊 [{c_nom}] {len(atletas)} atletas seleccionados:")
-        elif carrera_res is not None:
-            grupos_carrera = [carrera_res['carrera_id']]
+        if carrera_res is not None and carrera_res.get('convocados'):
             conv_ids = {str(c['atleta_id']).strip() for c in carrera_res.get('convocados', []) if c.get('atleta_id')}
-            if conv_ids:
-                atletas = [a for a in atletas_raw if str(a.get('athlete_id', '')).strip() in conv_ids]
+            atletas = client.get_athletes_list(roster_df=roster_df, convocados_ids=conv_ids)
+            if es_numero and any(int(a.get('carrera', 0)) == g_num for a in atletas):
+                grupos_carrera = [g_num]
+                atletas = [a for a in atletas if int(a.get('carrera', 0)) == g_num]
             else:
-                atletas = atletas_raw
-            print(f"\n📊 [{carrera_res['nombre_carrera']}] {len(atletas)} atletas seleccionados:")
+                grupos_carrera = [carrera_res['carrera_id']]
+            print(f"\n📊 [{carrera_res['nombre_carrera']}] {len(atletas)} atletas convocados:")
+        elif es_numero:
+            grupos_carrera = [g_num]
+            atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
+            atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == g_num] if any('carrera' in a for a in atletas_raw) else atletas_raw
+            c_nom = carrera_res['nombre_carrera'] if carrera_res else f"Grupo Carrera {g_num}"
+            print(f"\n📊 [{c_nom}] {len(atletas)} atletas seleccionados:")
         else:
             grupos_carrera = [grupo_especifico]
-            atletas = atletas_raw
+            atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
             print(f"\n📊 [{grupo_especifico}] {len(atletas)} atletas seleccionados:")
     else:
-        # Modo: Todos los grupos o corredores en competición
-        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
+        # Modo: Sin carrera específica
+        if solo_carrera:
+            from src.history_manager import obtener_carreras_calendario
+            atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=True)
+            if any(int(a.get('carrera', 0)) > 0 for a in atletas_raw):
+                atletas = atletas_raw
+                grupos_carrera = sorted(set(int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0))
+            else:
+                carreras = [c for c in obtener_carreras_calendario() if c.get('convocados')]
+                carreras_activas = [c for c in carreras if c.get('estado') == 'en_curso']
+                carreras_usar = carreras_activas if carreras_activas else carreras
+                if carreras_usar:
+                    grupos_carrera = [c['carrera_id'] for c in carreras_usar]
+                    all_conv = set()
+                    for c in carreras_usar:
+                        for conv in c.get('convocados', []):
+                            if conv.get('atleta_id'):
+                                all_conv.add(str(conv['atleta_id']).strip())
+                    atletas = client.get_athletes_list(roster_df=roster_df, convocados_ids=all_conv)
+                else:
+                    atletas = atletas_raw
+                    grupos_carrera = [None]
+        else:
+            atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
+            grupos_carrera = sorted(set(int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0)) if any(a.get('carrera') for a in atletas) else [None]
+
         if not atletas:
             print("❌ No se encontraron atletas para analizar.")
             return
 
-        if solo_carrera:
-            grupos_carrera = sorted(set(
-                int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0
-            ))
-        else:
-            grupos_carrera = sorted(set(
-                int(a.get('carrera', 0)) for a in atletas
-            ))
-
-        if not grupos_carrera:
-            grupos_carrera = [None]
-
-        print(f"\n📊 {len(atletas)} atletas en {len(grupos_carrera)} grupo/competición(es): {grupos_carrera}")
+        print(f"\n📊 {len(atletas)} atletas en {len(grupos_carrera)} competición(es): {grupos_carrera}")
 
     for a in atletas:
         c_num = a.get('carrera', 0)
@@ -179,6 +191,16 @@ def cmd_power_report(args):
             atletas_grupo = atletas
             label = ""
             titulo_grupo = getattr(args, 'titulo', None) or "Informe General"
+        elif len(grupos_carrera) == 1:
+            atletas_grupo = atletas
+            label = f"_carrera_{grupo}" if isinstance(grupo, int) else (f"_{c_slug}" if c_slug else f"_{grupo}")
+            titulo_esp = titulos_por_grupo.get(grupo, '') if isinstance(grupo, int) else ''
+            if titulo_esp:
+                titulo_grupo = titulo_esp
+            elif getattr(args, 'titulo', None):
+                titulo_grupo = f"{args.titulo} - Carrera {grupo}" if isinstance(grupo, int) else f"{args.titulo} - {c_nombre}"
+            else:
+                titulo_grupo = f"Grupo Carrera {grupo}" if isinstance(grupo, int) else c_nombre
         elif isinstance(grupo, int):
             atletas_grupo = [a for a in atletas if int(a.get('carrera', 0)) == grupo]
             label = f"_carrera_{grupo}"
@@ -275,27 +297,16 @@ def cmd_hrv_report(args):
 
     carrera_res = resolver_carrera(grupo_especifico) if grupo_especifico is not None else None
 
-    if carrera_res is not None:
-        atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
+    if carrera_res is not None and carrera_res.get('convocados'):
         conv_ids = {str(c['atleta_id']).strip() for c in carrera_res.get('convocados', []) if c.get('atleta_id')}
-        if conv_ids:
-            atletas = [a for a in atletas_raw if str(a.get('athlete_id', '')).strip() in conv_ids]
-        else:
-            try:
-                g_num = int(grupo_especifico)
-                atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == g_num]
-            except Exception:
-                atletas = atletas_raw
-        try:
-            grupos_carrera = [int(grupo_especifico)]
-        except (ValueError, TypeError):
-            grupos_carrera = [carrera_res['carrera_id']]
-        print(f"\n🩺 [{carrera_res['nombre_carrera']}] {len(atletas)} atletas seleccionados:")
+        atletas = client.get_athletes_list(roster_df=roster_df, convocados_ids=conv_ids)
+        grupos_carrera = [carrera_res['carrera_id']]
+        print(f"\n🩺 [{carrera_res['nombre_carrera']}] {len(atletas)} atletas convocados:")
     elif grupo_especifico is not None:
         atletas_raw = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
         try:
             g_num = int(grupo_especifico)
-            atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == g_num]
+            atletas = [a for a in atletas_raw if int(a.get('carrera', 0)) == g_num] if any('carrera' in a for a in atletas_raw) else atletas_raw
             grupos_carrera = [g_num]
         except Exception:
             atletas = atletas_raw
@@ -303,26 +314,33 @@ def cmd_hrv_report(args):
         if not atletas:
             print(f"❌ No se encontraron atletas asignados a {grupo_especifico} en {args.roster}.")
             return
-        print(f"\n🩺 [Carrera {grupo_especifico}] {len(atletas)} atletas seleccionados:")
+        print(f"\n🩺 [{grupo_especifico}] {len(atletas)} atletas seleccionados:")
     else:
-        atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
+        if solo_carrera:
+            from src.history_manager import obtener_carreras_calendario
+            carreras = [c for c in obtener_carreras_calendario() if c.get('convocados')]
+            carreras_activas = [c for c in carreras if c.get('estado') == 'en_curso']
+            carreras_usar = carreras_activas if carreras_activas else carreras
+            if carreras_usar:
+                grupos_carrera = [c['carrera_id'] for c in carreras_usar]
+                all_conv = set()
+                for c in carreras_usar:
+                    for conv in c.get('convocados', []):
+                        if conv.get('atleta_id'):
+                            all_conv.add(str(conv['atleta_id']).strip())
+                atletas = client.get_athletes_list(roster_df=roster_df, convocados_ids=all_conv)
+            else:
+                atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=solo_carrera)
+                grupos_carrera = sorted(set(int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0)) if any(a.get('carrera') for a in atletas) else [None]
+        else:
+            atletas = client.get_athletes_list(roster_df=roster_df, solo_carrera=False)
+            grupos_carrera = sorted(set(int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0)) if any(a.get('carrera') for a in atletas) else [None]
+
         if not atletas:
             print("❌ No se encontraron atletas para analizar.")
             return
 
-        if solo_carrera:
-            grupos_carrera = sorted(set(
-                int(a.get('carrera', 0)) for a in atletas if int(a.get('carrera', 0)) > 0
-            ))
-        else:
-            grupos_carrera = sorted(set(
-                int(a.get('carrera', 0)) for a in atletas
-            ))
-
-        if not grupos_carrera:
-            grupos_carrera = [None]
-
-        print(f"\n🩺 Descargando datos de bienestar para {len(atletas)} atletas en {len(grupos_carrera)} grupo/competición(es)...")
+        print(f"\n🩺 Descargando datos de bienestar para {len(atletas)} atletas en {len(grupos_carrera)} competición(es)...")
 
     for a in atletas:
         c_num = a.get('carrera', 0)
@@ -577,15 +595,24 @@ def cmd_interactive_profile(args):
     generar_docx = (formato in ['docx', 'ambos'])
     fits_limpiar = fits_temporales if not getattr(args, 'mantener_fits', False) else None
 
-    # Identificar grupos de carrera del roster (carrera > 0 → rider compite)
-    grupos_carrera = []
-    if not roster_df.empty and 'carrera' in roster_df.columns:
-        grupos_carrera = sorted(set(
-            int(c) for c in roster_df['carrera'] if int(c) > 0
-        ))
+    # Identificar competiciones del calendario
+    carreras_detectadas = []
+    carrera_arg = getattr(args, 'carrera', None)
+    if carrera_arg:
+        c_res = resolver_carrera(carrera_arg)
+        if c_res:
+            carreras_detectadas = [c_res['carrera_id']]
+    else:
+        try:
+            from src.history_manager import obtener_carreras_calendario
+            carreras_act = [c for c in obtener_carreras_calendario() if c.get('estado') == 'en_curso' and c.get('convocados')]
+            if carreras_act:
+                carreras_detectadas = [c['carrera_id'] for c in carreras_act]
+        except Exception:
+            pass
 
-    # Si se pasaron archivos manualmente o no hay grupos definidos → un único perfil global
-    forzar_global = bool(args.fit_files or getattr(args, 'fit_dir', None)) or not grupos_carrera
+    # Si se pasaron archivos manualmente o no hay carreras definidas → un único perfil global
+    forzar_global = bool(args.fit_files or getattr(args, 'fit_dir', None)) or not carreras_detectadas
     if forzar_global:
         out_html = Path(args.output) if args.output else None
         out_pdf = Path(args.output_pdf) if getattr(args, 'output_pdf', None) else None
@@ -619,13 +646,13 @@ def cmd_interactive_profile(args):
         print("=" * 55 + "\n")
         return
 
-    # Generar un perfil HTML (y PDF/Word) independiente por cada grupo o carrera
-    print(f"\n🏁 Detectadas {len(grupos_carrera)} competición/grupo(s): {grupos_carrera}")
+    # Generar un perfil HTML (y PDF/Word) independiente por cada competición
+    print(f"\n🏁 Detectadas {len(carreras_detectadas)} competición(es): {carreras_detectadas}")
     rutas_generadas = []
-    for idx, grupo in enumerate(grupos_carrera):
-        c_res = resolver_carrera(grupo)
-        c_nombre = c_res['nombre_carrera'] if c_res else f"Grupo Carrera {grupo}"
-        c_slug = c_res['carrera_id'] if c_res else f"carrera_{grupo}"
+    for idx, c_id in enumerate(carreras_detectadas):
+        c_res = resolver_carrera(c_id)
+        c_nombre = c_res['nombre_carrera'] if c_res else c_id
+        c_slug = c_res['carrera_id'] if c_res else c_id
 
         print(f"\n{'='*55}")
         print(f"🏁 Generando perfil para {c_nombre}...")
@@ -839,6 +866,7 @@ def cmd_sync_history(args):
         fecha_fin=args.hasta,
         incluir_wellness=not args.no_wellness,
         incluir_picos=not args.no_picos,
+        solo_nuevas=getattr(args, 'solo_nuevas', False),
         verbose=True
     )
 
@@ -985,6 +1013,7 @@ def main():
     p_sync.add_argument("--roster", default=str(DEFAULT_ROSTER_PATH), help="Ruta al CSV de plantilla de ciclistas (default: burgos.csv)")
     p_sync.add_argument("--desde", default="2026-01-01", help="Fecha de inicio para la sincronización YYYY-MM-DD (default: 2026-01-01)")
     p_sync.add_argument("--hasta", default=None, help="Fecha final para la sincronización YYYY-MM-DD (default: hoy)")
+    p_sync.add_argument("--solo-nuevas", action="store_true", help="Descarga únicamente actividades nuevas a partir del último registro de cada ciclista")
     p_sync.add_argument("--no-wellness", action="store_true", help="Omitir descarga de datos de bienestar/HRV")
     p_sync.add_argument("--no-picos", action="store_true", help="Omitir descarga de curvas de potencia de la temporada")
     p_sync.set_defaults(func=cmd_sync_history)

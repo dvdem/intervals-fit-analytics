@@ -4,23 +4,23 @@
 .DESCRIPTION
     Ejecuta el comando power-report de Intervals Fit Analytics en formato PDF, Word (.docx) o ambos.
 .PARAMETER Carrera
-    Filtrar por grupo de carrera especifico (ej. 1, 2). Si no se indica, procesa cada grupo por separado.
+    Filtrar por competición o carrera específica (ej. 'huangsan', '1', nombre o slug). Si no se indica, procesa las carreras activas del calendario.
 .PARAMETER Formato
     Formato del informe: 'pdf', 'docx' o 'ambos' (por defecto: 'pdf').
 .PARAMETER Titulo
     Titulo base para el informe (ej. 'Vuelta a Espana').
 .PARAMETER Titulo1
-    Titulo especifico para Grupo de Carrera 1.
+    Titulo especifico para Carrera 1.
 .PARAMETER Titulo2
-    Titulo especifico para Grupo de Carrera 2.
+    Titulo especifico para Carrera 2.
 .PARAMETER Titulo3
-    Titulo especifico para Grupo de Carrera 3.
+    Titulo especifico para Carrera 3.
 .PARAMETER Dias
     Ventana de dias para picos de potencia recientes (por defecto 30).
 .PARAMETER DiasCarga
     Ventana de dias para evolucion de CTL/ATL (por defecto 60).
 .PARAMETER Todos
-    Incluir a todos los atletas del equipo (incluso carrera=0).
+    Incluir a todos los atletas del equipo (sin filtro de convocatoria).
 .PARAMETER NoAbrir
     No abrir automaticamente los archivos generados.
 .EXAMPLE
@@ -28,11 +28,11 @@
 .EXAMPLE
     .\generar_power_report.ps1 -Formato docx
 .EXAMPLE
-    .\generar_power_report.ps1 -Carrera 1 -Formato ambos
+    .\generar_power_report.ps1 -Carrera huangsan -Formato ambos
 #>
 [CmdletBinding()]
 param (
-    [int]$Carrera,
+    [string]$Carrera = '',
     [ValidateSet('pdf', 'docx', 'ambos')]
     [string]$Formato = 'pdf',
     [string]$Titulo  = '',

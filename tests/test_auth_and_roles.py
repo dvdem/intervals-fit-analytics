@@ -191,6 +191,23 @@ class TestAuthAndRoles(unittest.TestCase):
         r_sync = client_visor.post("/api/sync")
         self.assertEqual(r_sync.status_code, 403)
 
+        # 7. Acceso prohibido a gestión de carreras y convocatorias (403)
+        r_race = client_visor.post("/api/races", json={
+            "nombre_carrera": "Carrera Prohibida",
+            "categoria": "UCI 2.Pro",
+            "pais": "España",
+            "total_etapas": 5,
+            "fecha_inicio": "2026-09-01",
+            "fecha_fin": "2026-09-05"
+        })
+        self.assertEqual(r_race.status_code, 403)
+
+        r_conv = client_visor.post("/api/races/carrera_test/convocatoria", json={"convocados": ["i1"]})
+        self.assertEqual(r_conv.status_code, 403)
+
+        r_del_race = client_visor.delete("/api/races/carrera_test")
+        self.assertEqual(r_del_race.status_code, 403)
+
         # Limpieza
         eliminar_usuario(visor_user)
 

@@ -282,23 +282,20 @@ class TestWebAPI(unittest.TestCase):
         self.client.post("/api/race-groups/1", json=restore_payload)
 
     def test_dashboard_enriched_race_groups(self):
-        """Verifica que el dashboard general incluya los grupos de carrera enriquecidos con métricas."""
+        """Verifica que el dashboard general incluya competiciones enriquecidas con métricas y convocados."""
         res = self.client.get("/api/dashboard")
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertIn("grupos", data)
-        grupos = data["grupos"]
-        self.assertIn("1", grupos)
-        self.assertIn("2", grupos)
-
-        g1 = grupos["1"]
-        self.assertIn("nombre_carrera", g1)
-        self.assertIn("categoria", g1)
-        self.assertIn("stats", g1)
-        self.assertIn("dist_total_km", g1["stats"])
-        self.assertIn("kj_totales", g1["stats"])
-        self.assertIn("progreso_pct", g1)
-        self.assertIn("atletas", g1)
+        self.assertIn("carreras_activas", data)
+        self.assertIn("total_carreras", data)
+        carrera_info = data.get("proxima_carrera") or data.get("ultima_carrera")
+        if carrera_info:
+            self.assertIn("nombre_carrera", carrera_info)
+            self.assertIn("categoria", carrera_info)
+            self.assertIn("dist_total_km", carrera_info)
+            self.assertIn("kj_totales", carrera_info)
+            self.assertIn("progreso_pct", carrera_info)
+            self.assertIn("convocados", carrera_info)
 
     def test_race_history_and_summary(self):
         """Verifica la consulta de histórico etapa a etapa y balance final de una carrera."""

@@ -1,16 +1,16 @@
-Name;intervals_id;weight;FTP;carrera;biela
-Carlos Garcia;i495562;62.0;380.0;2;165.0
-Lorenzo Quartucci;i545517;64.0;390.0;1;170.0
-Sinuhe Fernandez;i545516;60.0;373.0;0;170.0
-Ander Okamika;i546414;70.0;414.0;0;175.0
-Adrian Fajardo;i547906;63.0;350.0;2;170.0
-Jose Luis Faura;i547904;67.0;390.0;0;170.0
-Jose Manuel Diaz;i547157;64.0;380.0;0;170.0
-Alex Mayer;i93850;66.0;348.0;0;165.0
-Eric Fagundez;i553889;67.0;404.0;2;170.0
-Georgios Bouglas;i554492;71.0;375.0;1;172.5
-Cesar Macias;i281806;57.0;329.0;2;165.0
-Martin Rey;i554086;65.0;380.0;0;175.0
-Mario Aparicio;i554068;71.0;440.0;0;172.5
-Vojtěch Kmínek;i554486;75.0;327.0;1;172.5
-Daniel Cavia;i701963;65.5;360.0;1;170.0
+Name;intervals_id;weight;FTP;biela
+Carlos Garcia;i495562;62.0;380.0;165.0
+Lorenzo Quartucci;i545517;64.0;390.0;170.0
+Sinuhe Fernandez;i545516;60.0;373.0;170.0
+Ander Okamika;i546414;70.0;414.0;175.0
+Adrian Fajardo;i547906;63.0;350.0;170.0
+Jose Luis Faura;i547904;67.0;390.0;170.0
+Jose Manuel Diaz;i547157;64.0;380.0;170.0
+Alex Mayer;i93850;66.0;348.0;165.0
+Eric Fagundez;i553889;67.0;404.0;170.0
+Georgios Bouglas;i554492;71.0;375.0;172.5
+Cesar Macias;i281806;57.0;329.0;165.0
+Martin Rey;i554086;65.0;380.0;175.0
+Mario Aparicio;i554068;71.0;440.0;172.5
+Vojtěch Kmínek;i554486;75.0;327.0;172.5
+Daniel Cavia;i701963;65.5;360.0;170.0

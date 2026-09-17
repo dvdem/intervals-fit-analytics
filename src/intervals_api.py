@@ -15,7 +15,7 @@ if str(_ROOT_DIR) not in sys.path:
 import time
 from datetime import datetime, timedelta
 from io import StringIO
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import requests
 from requests.auth import HTTPBasicAuth
 import pandas as pd
@@ -118,10 +118,15 @@ class IntervalsClient:
             return data if isinstance(data, list) else [data]
         raise RuntimeError(f"Error al obtener athlete-summary ({resp.status_code}): {resp.text}")
 
-    def get_athletes_list(self, roster_df: Optional[pd.DataFrame] = None, solo_carrera: bool = False) -> List[Dict[str, Any]]:
+    def get_athletes_list(
+        self,
+        roster_df: Optional[pd.DataFrame] = None,
+        solo_carrera: bool = False,
+        convocados_ids: Optional[Set[str]] = None
+    ) -> List[Dict[str, Any]]:
         """
         Obtiene la lista consolidada de atletas y cruza los nombres con el roster local si se proporciona.
-        Enriquece cada atleta con su número de carrera del roster (campo 'carrera').
+        Permite filtrar directamente por convocados_ids o ciclistas convocados en carreras activas del calendario.
         """
         atletas = self.get_athlete_summary("0")
         # Quitar duplicados
@@ -131,19 +136,28 @@ class IntervalsClient:
             df = roster_df.copy()
             df['intervals_id'] = df['intervals_id'].astype(str).str.strip()
             nombres_map = dict(zip(df['intervals_id'], df['Name']))
-            carrera_map = dict(zip(df['intervals_id'], df['carrera'].astype(int))) if 'carrera' in df.columns else {}
 
             for atleta in atletas_unicos:
                 aid = str(atleta.get('athlete_id', '')).strip()
                 if aid in nombres_map:
                     atleta['athlete_name'] = nombres_map[aid]
-                # Anotar el número de carrera en el dict del atleta
-                atleta['carrera'] = carrera_map.get(aid, 0)
 
-            if solo_carrera and 'carrera' in df.columns:
-                # Incluir todos con carrera > 0 (cualquier grupo de competición)
-                ids_carrera = set(df.loc[df['carrera'] > 0, 'intervals_id'].astype(str))
-                atletas_unicos = [a for a in atletas_unicos if str(a.get('athlete_id', '')).strip() in ids_carrera]
+        if convocados_ids is not None:
+            conv_clean = {str(x).strip() for x in convocados_ids if x}
+            atletas_unicos = [a for a in atletas_unicos if str(a.get('athlete_id', '')).strip() in conv_clean]
+        elif solo_carrera:
+            try:
+                from src.history_manager import obtener_carreras_calendario
+                carreras = obtener_carreras_calendario()
+                ids_activas = set()
+                for c in carreras:
+                    for conv in c.get('convocados', []):
+                        if conv.get('atleta_id'):
+                            ids_activas.add(str(conv['atleta_id']).strip())
+                if ids_activas:
+                    atletas_unicos = [a for a in atletas_unicos if str(a.get('athlete_id', '')).strip() in ids_activas]
+            except Exception:
+                pass
 
         return atletas_unicos
 

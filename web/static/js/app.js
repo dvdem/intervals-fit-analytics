@@ -108,6 +108,13 @@ function updateChartsTheme() {
 }
 
 function navigateToTab(tabId) {
+  const role = AppState.currentUser ? AppState.currentUser.rol : 'visor';
+  if (role === 'visor' && (tabId === 'tab-admin' || tabId === 'tab-users')) {
+    tabId = 'tab-dashboard';
+  } else if (role === 'editor' && tabId === 'tab-users') {
+    tabId = 'tab-dashboard';
+  }
+
   document.querySelectorAll('.nav-item').forEach(item => {
     if (item.getAttribute('data-tab') === tabId) {
       item.classList.add('active');
@@ -228,7 +235,7 @@ async function loadDashboardData() {
     document.getElementById('kpi-total-athletes').textContent = data.total_ciclistas;
     const activeCount = (data.carreras_activas && data.carreras_activas.length > 0)
       ? data.carreras_activas.reduce((acc, c) => acc + (c.num_convocados || (c.convocados ? c.convocados.length : 0)), 0)
-      : ((data.en_carrera_1?.length || 0) + (data.en_carrera_2?.length || 0));
+      : 0;
     document.getElementById('kpi-active-racers').textContent = `${activeCount} activos en carrera`;
 
     document.getElementById('kpi-total-activities').textContent = data.db_stats?.num_actividades || 0;
@@ -244,10 +251,10 @@ async function loadDashboardData() {
     document.getElementById('sidebar-db-size').textContent = `${dbSize} KB`;
 
     // Renderizar Bloques de Carreras en Vivo o Próximas en Dashboard
-    renderDashboardRaces(data.carreras_activas, data.proxima_carrera, data.ultima_carrera, data.grupos);
+    renderDashboardRaces(data.carreras_activas, data.proxima_carrera, data.ultima_carrera);
 
     // Cargar carreras para selectores de informe de potencia
-    loadRacesForSelects(data.grupos);
+    loadRacesForSelects();
 
     // Últimas etapas registradas
     const tbodyStages = document.getElementById('tbody-recent-stages');
@@ -298,6 +305,9 @@ function renderRosterList(elementId, athletes, badgeId, label) {
 function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fallbackGrupos) {
   const container = document.getElementById('race-groups-container');
   if (!container) return;
+
+  const role = AppState.currentUser ? AppState.currentUser.rol : 'visor';
+  const isVisor = role === 'visor';
 
   // 1. Si hay carreras activas hoy en curso: mostrarlas
   if (carrerasActivas && carrerasActivas.length > 0) {
@@ -378,9 +388,11 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
               <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">
                 Ciclistas Convocados (${convocados.length})
               </span>
+              ${!isVisor ? `
               <button class="btn btn-secondary btn-sm" style="padding: 2px 8px; font-size: 0.75rem;" onclick="openConvocatoriaModal('${c.carrera_id}')">
                 👥 Modificar
               </button>
+              ` : ''}
             </div>
             <ul class="race-roster-list">
               ${convocadosListHtml}
@@ -391,9 +403,11 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
             <button class="btn btn-primary btn-sm" onclick="openRaceHistoryModal('${c.carrera_id}', '${escapeJs(c.nombre_carrera)}')">
               <span>📊</span> Histórico de la Vuelta
             </button>
+            ${!isVisor ? `
             <button class="btn btn-secondary btn-sm" onclick="openEditRaceModal('${c.carrera_id}')">
               <span>✏️</span> Editar Carrera
             </button>
+            ` : ''}
           </div>
         </div>
       `;
@@ -449,12 +463,14 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
         </div>
 
         <div class="race-card-actions">
+          ${!isVisor ? `
           <button class="btn btn-primary btn-sm" onclick="openConvocatoriaModal('${proximaCarrera.carrera_id}')">
             <span>👥</span> Gestionar Convocatoria
           </button>
           <button class="btn btn-secondary btn-sm" onclick="openEditRaceModal('${proximaCarrera.carrera_id}')">
             <span>✏️</span> Editar Carrera
           </button>
+          ` : ''}
         </div>
       </div>
     `;
@@ -507,21 +523,17 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
           <button class="btn btn-primary btn-sm" onclick="openRaceHistoryModal('${ultimaCarrera.carrera_id}', '${escapeJs(ultimaCarrera.nombre_carrera)}')">
             <span>📊</span> Ver Balance Histórico
           </button>
+          ${!isVisor ? `
           <button class="btn btn-secondary btn-sm" onclick="openEditRaceModal('${ultimaCarrera.carrera_id}')">
             <span>✏️</span> Editar
           </button>
+          ` : ''}
         </div>
       </div>
     `;
   }
 
   if (!cardsHtml) {
-    // Si no hay carreras activas ni próxima ni última, fallback a grupos tradicionales
-    if (fallbackGrupos && (fallbackGrupos['1'] || fallbackGrupos['2'])) {
-      renderRaceGroups(fallbackGrupos);
-      return;
-    }
-
     container.innerHTML = `
       <div style="grid-column: 1 / -1; text-align: center; color: var(--text-dim); padding: 36px 20px; background: var(--card-item-bg); border-radius: var(--radius-lg); border: 1px dashed var(--border-subtle);">
         <div style="font-size: 2.5rem; margin-bottom: 10px;">🏆</div>
@@ -529,9 +541,11 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
         <p style="font-size: 0.88rem; color: var(--text-muted); max-width: 500px; margin: 0 auto 16px auto;">
           Da de alta las carreras de la temporada con sus fechas de inicio, fin y ciclistas convocados para habilitar el seguimiento automático en vivo.
         </p>
+        ${!isVisor ? `
         <button class="btn btn-primary" onclick="openCreateRaceModal()">
           <span>➕</span> Dar de Alta Primera Carrera
         </button>
+        ` : ''}
       </div>
     `;
     return;
@@ -540,117 +554,7 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
   container.innerHTML = cardsHtml;
 }
 
-function renderRaceGroups(grupos) {
-  const container = document.getElementById('race-groups-container');
-  if (!container) return;
-
-  const g1 = grupos['1'] || {};
-  const g2 = grupos['2'] || {};
-
-  const renderCard = (g, groupNum) => {
-    const flag = getCountryFlag(g.pais);
-    let statusBadgeClass = 'badge-status-upcoming';
-    if (g.estado === 'en_curso') statusBadgeClass = 'badge-status-live';
-    if (g.estado === 'finalizada') statusBadgeClass = 'badge-status-finished';
-
-    const athletes = g.atletas || [];
-    const athletesListHtml = athletes.length > 0
-      ? athletes.map(a => {
-          const displayName = getAthleteDisplayName(a);
-          const badgeMeta = a.rol || (a.dorsal ? `#${a.dorsal}` : 'Corredor');
-          const lastStageInfo = a.ultima_etapa_km ? ` · <span style="color: var(--accent-cyan); font-size: 0.78rem;">Últ: ${a.ultima_etapa_km} km (${(a.ultima_etapa_kj || 0).toLocaleString()} kJ)</span>` : '';
-          return `
-            <li class="race-roster-item">
-              <div>
-                <strong>${escapeHtml(displayName)}</strong>
-                <span style="font-size: 0.8rem; color: var(--text-dim);">(${a.weight || 70} kg, ${a.ftp || 380} W)</span>
-                ${lastStageInfo}
-              </div>
-              <span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(badgeMeta)}</span>
-            </li>
-          `;
-        }).join('')
-      : `<li style="color: var(--text-dim); padding: 8px 0;">Sin ciclistas asignados a este grupo.</li>`;
-
-    const fechaStr = (g.fecha_inicio && g.fecha_fin) ? `${g.fecha_inicio} a ${g.fecha_fin}` : (g.fecha_inicio || 'Fechas de carrera');
-    const totalKm = g.stats?.dist_total_km || 0;
-    const totalKj = g.stats?.kj_totales || 0;
-    const tsbMedio = g.stats?.tsb_medio ?? 0;
-
-    return `
-      <div class="race-card race-card-c${groupNum}">
-        <div class="race-card-header">
-          <div class="race-title-group">
-            <div class="race-name">
-              <span>${flag}</span>
-              <span>${g.nombre_carrera || `Grupo Carrera ${groupNum}`}</span>
-            </div>
-            <div class="race-meta-sub">
-              <span class="badge-uci">${g.categoria || 'UCI 2.Pro'}</span>
-              <span>•</span>
-              <span>${g.pais || 'España'}</span>
-              <span>•</span>
-              <span>${fechaStr}</span>
-            </div>
-          </div>
-          <span class="badge-status ${statusBadgeClass}">${g.estado_label || 'En Curso'}</span>
-        </div>
-
-        <div class="race-progress-box">
-          <div class="race-progress-header">
-            <span><strong>Etapa ${g.etapa_actual}</strong> de ${g.total_etapas}</span>
-            <span>${g.progreso_pct}% completado</span>
-          </div>
-          <div class="stage-progress-bar">
-            <div class="stage-progress-fill fill-c${groupNum}" style="width: ${g.progreso_pct}%;"></div>
-          </div>
-        </div>
-
-        <div class="race-mini-kpis">
-          <div class="mini-kpi-item">
-            <div class="mini-kpi-val" style="color: var(--accent-cyan);">${(totalKj).toLocaleString()} kJ</div>
-            <div class="mini-kpi-lbl">⚡ Gasto Bloque</div>
-          </div>
-          <div class="mini-kpi-item">
-            <div class="mini-kpi-val">${totalKm.toLocaleString()} km</div>
-            <div class="mini-kpi-lbl">📏 Dist. Acumulada</div>
-          </div>
-          <div class="mini-kpi-item">
-            <div class="mini-kpi-val" style="color: ${tsbMedio >= 0 ? 'var(--accent-emerald)' : 'var(--accent-amber)'};">${tsbMedio > 0 ? '+' : ''}${tsbMedio}</div>
-            <div class="mini-kpi-lbl">🔋 TSB Medio</div>
-          </div>
-        </div>
-
-        <div>
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px;">
-              Corredores Convocados (${athletes.length})
-            </span>
-          </div>
-          <ul class="race-roster-list">
-            ${athletesListHtml}
-          </ul>
-        </div>
-
-        <div class="race-card-actions">
-          <button class="btn btn-primary btn-sm" onclick="openRaceHistoryModal('${g.carrera_id_link || g.nombre_carrera}', '${escapeJs(g.nombre_carrera)}')">
-            <span>📊</span> Histórico de la Vuelta
-          </button>
-          <button class="btn btn-secondary btn-sm" onclick="openGroupStageProfile('${g.stats?.ultima_fecha || ''}')">
-            <span>🗺️</span> Ver Perfil Etapa
-          </button>
-          <button class="btn btn-secondary btn-sm" onclick="openRaceGroupConfigModal(${groupNum})">
-            <span>✏️</span> Configurar Carrera
-          </button>
-        </div>
-      </div>
-    `;
-  };
-
-  container.innerHTML = renderCard(g1, 1) + renderCard(g2, 2);
-}
-
-function updateReportRaceSelect(races, grupos) {
+function updateReportRaceSelect(races) {
   const sel = document.getElementById('report-select-group');
   if (!sel) return;
 
@@ -666,24 +570,11 @@ function updateReportRaceSelect(races, grupos) {
     html += `</optgroup>`;
   }
 
-  if (grupos) {
-    html += `<optgroup label="Grupos Tradicionales">`;
-    const g1Name = grupos['1']?.nombre_carrera || 'Grupo Carrera 1';
-    const g2Name = grupos['2']?.nombre_carrera || 'Grupo Carrera 2';
-    const g1Count = grupos['1']?.atletas?.length || 0;
-    const g2Count = grupos['2']?.atletas?.length || 0;
-    html += `
-      <option value="1">Grupo 1: ${g1Name} (${g1Count} ciclistas)</option>
-      <option value="2">Grupo 2: ${g2Name} (${g2Count} ciclistas)</option>
-    `;
-    html += `</optgroup>`;
-  }
-
   sel.innerHTML = html;
   if (currentVal) sel.value = currentVal;
 }
 
-function updateStageRaceSelect(races, grupos) {
+function updateStageRaceSelect(races) {
   const sel = document.getElementById('stage-select-group');
   if (!sel) return;
 
@@ -699,26 +590,13 @@ function updateStageRaceSelect(races, grupos) {
     html += `</optgroup>`;
   }
 
-  if (grupos) {
-    html += `<optgroup label="Grupos Tradicionales">`;
-    const g1Name = grupos['1']?.nombre_carrera || 'Grupo Carrera 1';
-    const g2Name = grupos['2']?.nombre_carrera || 'Grupo Carrera 2';
-    const g1Count = grupos['1']?.atletas?.length || 0;
-    const g2Count = grupos['2']?.atletas?.length || 0;
-    html += `
-      <option value="1">Grupo 1: ${g1Name} (${g1Count} ciclistas)</option>
-      <option value="2">Grupo 2: ${g2Name} (${g2Count} ciclistas)</option>
-    `;
-    html += `</optgroup>`;
-  }
-
   html += `<option value="todos">Todos los corredores (Sin filtro)</option>`;
 
   sel.innerHTML = html;
   if (currentVal) sel.value = currentVal;
 }
 
-async function loadRacesForSelects(grupos) {
+async function loadRacesForSelects() {
   try {
     const res = await fetch('/api/races');
     if (res.ok) {
@@ -727,8 +605,8 @@ async function loadRacesForSelects(grupos) {
   } catch (e) {
     // Silencioso
   }
-  updateReportRaceSelect(AppState.racesCalendar, grupos);
-  updateStageRaceSelect(AppState.racesCalendar, grupos);
+  updateReportRaceSelect(AppState.racesCalendar);
+  updateStageRaceSelect(AppState.racesCalendar);
 }
 
 function openGroupStageProfile(fecha) {
@@ -746,7 +624,7 @@ function viewStageDate(fecha) {
   document.getElementById('btn-run-stage-analysis')?.click();
 }
 
-// Sincronización en segundo plano con Intervals.icu
+// Sincronización en segundo plano con Intervals.icu (solo actividades nuevas)
 document.getElementById('btn-sync-api')?.addEventListener('click', async () => {
   if (AppState.isSyncing) {
     showToast('Ya hay una sincronización en curso', 'info');
@@ -754,10 +632,10 @@ document.getElementById('btn-sync-api')?.addEventListener('click', async () => {
   }
   try {
     AppState.isSyncing = true;
-    document.getElementById('api-status-text').textContent = 'Sincronizando con Intervals...';
-    showToast('Iniciando sincronización masiva...', 'info');
+    document.getElementById('api-status-text').textContent = 'Sincronizando actividades nuevas...';
+    showToast('Iniciando sincronización de actividades nuevas...', 'info');
 
-    const res = await fetch('/api/sync?desde=2026-01-01', { method: 'POST' });
+    const res = await fetch('/api/sync?solo_nuevas=true', { method: 'POST' });
     const data = await res.json();
     showToast(data.message, 'info');
 
@@ -1858,11 +1736,6 @@ async function loadAthletesAdmin() {
         <td class="mono">${a.ftp} W</td>
         <td class="mono">${a.biela} mm</td>
         <td>
-          <span class="badge badge-race-${a.carrera}">
-            ${a.carrera === 1 ? 'Carrera 1' : (a.carrera === 2 ? 'Carrera 2' : 'Descanso')}
-          </span>
-        </td>
-        <td>
           ${isVisor ? '<span style="font-size: 0.78rem; color: var(--text-dim);">Solo lectura</span>' : `
             <button class="btn btn-secondary btn-sm" onclick="openEditAthleteModal('${escapeJs(a.intervals_id)}')">✏️ Editar</button>
             ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="deleteAthletePrompt('${escapeJs(a.intervals_id)}', '${escapeJs(a.name)}')">🗑️</button>` : ''}
@@ -1875,10 +1748,10 @@ async function loadAthletesAdmin() {
     if (checklistContainer) {
       checklistContainer.innerHTML = athletes.map(a => `
         <label style="background: var(--checklist-item-bg); padding: 10px 14px; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); display: flex; align-items: center; gap: 10px; cursor: pointer;">
-          <input type="checkbox" value="${a.intervals_id}" class="chk-assign-athlete" ${a.carrera > 0 ? 'checked' : ''} style="accent-color: var(--accent-cyan);">
+          <input type="checkbox" value="${a.intervals_id}" class="chk-assign-athlete" style="accent-color: var(--accent-cyan);">
           <div>
             <div style="font-weight: 600; font-size: 0.9rem;">${a.name}</div>
-            <div style="font-size: 0.75rem; color: var(--text-dim);">${a.intervals_id} (Grupo ${a.carrera})</div>
+            <div style="font-size: 0.75rem; color: var(--text-dim);">${a.intervals_id}</div>
           </div>
         </label>
       `).join('');
@@ -2232,7 +2105,6 @@ function openAddAthleteModal() {
   document.getElementById('form-athlete-weight').value = '70';
   document.getElementById('form-athlete-ftp').value = '380';
   document.getElementById('form-athlete-biela').value = '170';
-  document.getElementById('form-athlete-carrera').value = '0';
 
   document.getElementById('modal-athlete').classList.add('active');
 }
@@ -2249,7 +2121,6 @@ function openEditAthleteModal(athleteId) {
   document.getElementById('form-athlete-weight').value = athlete.weight;
   document.getElementById('form-athlete-ftp').value = athlete.ftp;
   document.getElementById('form-athlete-biela').value = athlete.biela;
-  document.getElementById('form-athlete-carrera').value = athlete.carrera;
 
   document.getElementById('modal-athlete').classList.add('active');
 }
@@ -2271,8 +2142,7 @@ document.getElementById('form-athlete')?.addEventListener('submit', async (e) =>
     name: document.getElementById('form-athlete-name').value.trim(),
     weight: parseFloat(document.getElementById('form-athlete-weight').value),
     ftp: parseFloat(document.getElementById('form-athlete-ftp').value),
-    biela: parseFloat(document.getElementById('form-athlete-biela').value),
-    carrera: parseInt(document.getElementById('form-athlete-carrera').value)
+    biela: parseFloat(document.getElementById('form-athlete-biela').value)
   };
 
   try {
@@ -2357,90 +2227,6 @@ document.getElementById('btn-save-race-assignment')?.addEventListener('click', a
 // =============================================================================
 // MÓDULO 6: CONFIGURACIÓN DE GRUPOS DE CARRERA Y CONSULTA DE HISTÓRICO DE VUELTA
 // =============================================================================
-
-// Modal Configuración de Carrera del Grupo
-async function openRaceGroupConfigModal(groupNum) {
-  try {
-    const [resGroups, resRaces] = await Promise.all([
-      fetch('/api/race-groups'),
-      fetch('/api/races')
-    ]);
-
-    const groupsData = await resGroups.json();
-    const races = await resRaces.json();
-    const cfg = (groupsData && groupsData[String(groupNum)]) || {};
-
-    document.getElementById('form-rg-grupo-id').value = groupNum;
-    document.getElementById('modal-rg-title').textContent = `Configurar Carrera: Grupo ${groupNum}`;
-    document.getElementById('form-rg-nombre').value = cfg.nombre_carrera || '';
-    document.getElementById('form-rg-categoria').value = cfg.categoria || 'UCI 2.Pro';
-    document.getElementById('form-rg-pais').value = cfg.pais || 'España';
-    document.getElementById('form-rg-total-etapas').value = cfg.total_etapas || 5;
-    document.getElementById('form-rg-etapa-actual').value = cfg.etapa_actual || 1;
-    document.getElementById('form-rg-fecha-inicio').value = cfg.fecha_inicio || '';
-    document.getElementById('form-rg-fecha-fin').value = cfg.fecha_fin || '';
-    document.getElementById('form-rg-notas').value = cfg.notas || '';
-
-    const selectLink = document.getElementById('form-rg-carrera-link');
-    if (selectLink) {
-      selectLink.innerHTML = `<option value="">-- Autodetección automática por corredor --</option>` +
-        (races || []).map(r => `
-          <option value="${r.carrera_id}" ${cfg.carrera_id_link === r.carrera_id ? 'selected' : ''}>
-            ${r.nombre_carrera} (${r.fecha_inicio || ''})
-          </option>
-        `).join('');
-      if (cfg.carrera_id_link) {
-        selectLink.value = cfg.carrera_id_link;
-      }
-    }
-
-    document.getElementById('modal-race-group-config').classList.add('active');
-  } catch (err) {
-    console.error(err);
-    showToast('Error al abrir configuración del grupo', 'error');
-  }
-}
-
-function closeRaceGroupConfigModal() {
-  document.getElementById('modal-race-group-config')?.classList.remove('active');
-}
-
-document.getElementById('btn-close-rg-modal')?.addEventListener('click', closeRaceGroupConfigModal);
-document.getElementById('btn-cancel-rg-modal')?.addEventListener('click', closeRaceGroupConfigModal);
-
-document.getElementById('form-race-group-config')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const grupoId = document.getElementById('form-rg-grupo-id').value;
-  const payload = {
-    nombre_carrera: document.getElementById('form-rg-nombre').value.trim(),
-    categoria: document.getElementById('form-rg-categoria').value,
-    pais: document.getElementById('form-rg-pais').value.trim(),
-    total_etapas: parseInt(document.getElementById('form-rg-total-etapas').value) || 5,
-    etapa_actual: parseInt(document.getElementById('form-rg-etapa-actual').value) || 1,
-    fecha_inicio: document.getElementById('form-rg-fecha-inicio').value || null,
-    fecha_fin: document.getElementById('form-rg-fecha-fin').value || null,
-    notas: document.getElementById('form-rg-notas').value.trim() || null,
-    carrera_id_link: document.getElementById('form-rg-carrera-link').value || null
-  };
-
-  try {
-    const res = await fetch(`/api/race-groups/${grupoId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || 'Error al guardar configuración');
-    }
-    showToast(`Configuración de Grupo ${grupoId} actualizada con éxito`, 'success');
-    closeRaceGroupConfigModal();
-    loadDashboardData();
-  } catch (err) {
-    console.error(err);
-    showToast(err.message, 'error');
-  }
-});
 
 // Modal Histórico de Vuelta
 async function openRaceHistoryModal(carreraId, carreraNombre) {
@@ -2780,7 +2566,9 @@ function updateUserUI(user) {
 
 function applyRoleRestrictions(role) {
   const visorBanner = document.getElementById('visor-notice-banner');
+  const navAdmin = document.getElementById('nav-item-admin');
   const navUsers = document.getElementById('nav-item-users');
+  const btnManageConvocatorias = document.getElementById('btn-manage-convocatorias');
   const btnSync = document.getElementById('btn-sync-api');
   const btnAddAthlete = document.getElementById('btn-open-add-athlete-modal');
   const btnCreateRace = document.getElementById('btn-open-create-race-modal');
@@ -2788,26 +2576,37 @@ function applyRoleRestrictions(role) {
 
   if (role === 'administrador') {
     if (visorBanner) visorBanner.style.display = 'none';
+    if (navAdmin) navAdmin.style.display = '';
     if (navUsers) navUsers.style.display = 'block';
+    if (btnManageConvocatorias) btnManageConvocatorias.style.display = 'inline-flex';
     if (btnSync) btnSync.style.display = 'inline-flex';
     if (btnAddAthlete) btnAddAthlete.style.display = 'inline-flex';
     if (btnCreateRace) btnCreateRace.style.display = 'inline-flex';
     if (btnAssignRace) btnAssignRace.style.display = 'inline-block';
   } else if (role === 'editor') {
     if (visorBanner) visorBanner.style.display = 'none';
+    if (navAdmin) navAdmin.style.display = '';
     if (navUsers) navUsers.style.display = 'none';
+    if (btnManageConvocatorias) btnManageConvocatorias.style.display = 'inline-flex';
     if (btnSync) btnSync.style.display = 'none';
     if (btnAddAthlete) btnAddAthlete.style.display = 'inline-flex';
     if (btnCreateRace) btnCreateRace.style.display = 'inline-flex';
     if (btnAssignRace) btnAssignRace.style.display = 'inline-block';
   } else {
-    // Rol: visor (Solo Lectura)
+    // Rol: visor (Solo Lectura) - Oculta la parte de gestión del equipo y administración
     if (visorBanner) visorBanner.style.display = 'flex';
+    if (navAdmin) navAdmin.style.display = 'none';
     if (navUsers) navUsers.style.display = 'none';
+    if (btnManageConvocatorias) btnManageConvocatorias.style.display = 'none';
     if (btnSync) btnSync.style.display = 'none';
     if (btnAddAthlete) btnAddAthlete.style.display = 'none';
     if (btnCreateRace) btnCreateRace.style.display = 'none';
     if (btnAssignRace) btnAssignRace.style.display = 'none';
+
+    // Si el usuario estaba en tab-admin o tab-users, regresar a dashboard
+    if (AppState.currentTab === 'tab-admin' || AppState.currentTab === 'tab-users') {
+      navigateToTab('tab-dashboard');
+    }
   }
 }
 
