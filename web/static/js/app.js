@@ -231,24 +231,27 @@ async function loadDashboardData() {
 
     AppState.athletes = data.ciclistas || [];
 
-    // Actualizar KPIs
-    document.getElementById('kpi-total-athletes').textContent = data.total_ciclistas;
+    // Actualizar KPIs con comprobación defensiva
+    const setElemText = (id, text) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    };
+
+    setElemText('kpi-total-athletes', data.total_ciclistas);
     const activeCount = (data.carreras_activas && data.carreras_activas.length > 0)
       ? data.carreras_activas.reduce((acc, c) => acc + (c.num_convocados || (c.convocados ? c.convocados.length : 0)), 0)
       : 0;
-    document.getElementById('kpi-active-racers').textContent = `${activeCount} activos en carrera`;
+    setElemText('kpi-active-racers', `${activeCount} activos en carrera`);
 
-    document.getElementById('kpi-total-activities').textContent = data.db_stats?.num_actividades || 0;
+    setElemText('kpi-total-activities', data.db_stats?.num_actividades || 0);
     const racesCount = data.total_carreras ?? data.db_stats?.num_carreras ?? 0;
-    document.getElementById('kpi-races-count').textContent = `${racesCount} carreras registradas`;
+    setElemText('kpi-races-count', `${racesCount} carreras registradas`);
 
     const totalKj = data.db_stats?.total_kj_registrados || 0;
-    document.getElementById('kpi-total-work').textContent = `${(totalKj).toLocaleString()} kJ`;
+    setElemText('kpi-total-work', `${(totalKj).toLocaleString()} kJ`);
 
-    document.getElementById('kpi-total-peaks').textContent = data.db_stats?.num_picos_registrados || 0;
-
-    const dbSize = data.db_stats?.tamano_kb || 0;
-    document.getElementById('sidebar-db-size').textContent = `${dbSize} KB`;
+    setElemText('kpi-total-peaks', data.db_stats?.num_picos_registrados || 0);
+    setElemText('sidebar-db-size', `${data.db_stats?.tamano_kb || 0} KB`);
 
     // Renderizar Bloques de Carreras en Vivo o Próximas en Dashboard
     renderDashboardRaces(data.carreras_activas, data.proxima_carrera, data.ultima_carrera);
@@ -256,24 +259,26 @@ async function loadDashboardData() {
     // Cargar carreras para selectores de informe de potencia
     loadRacesForSelects();
 
-    // Últimas etapas registradas
+    // Últimas etapas registradas (si el contenedor está presente en el DOM)
     const tbodyStages = document.getElementById('tbody-recent-stages');
-    if (data.ultimas_etapas && data.ultimas_etapas.length > 0) {
-      tbodyStages.innerHTML = data.ultimas_etapas.map(et => `
-        <tr>
-          <td><strong>${et.nombre_carrera || et.carrera_id}</strong></td>
-          <td><span class="badge badge-race-1">Etapa ${et.etapa_num}</span></td>
-          <td class="mono">${et.fecha}</td>
-          <td>${et.num_ciclistas} ciclistas</td>
-          <td>
-            <button class="btn btn-secondary btn-sm" onclick="viewStageDate('${et.fecha}')">
-              <span>🗺️</span> Ver Perfil
-            </button>
-          </td>
-        </tr>
-      `).join('');
-    } else {
-      tbodyStages.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-dim);">No hay etapas registradas aún.</td></tr>`;
+    if (tbodyStages) {
+      if (data.ultimas_etapas && data.ultimas_etapas.length > 0) {
+        tbodyStages.innerHTML = data.ultimas_etapas.map(et => `
+          <tr>
+            <td><strong>${et.nombre_carrera || et.carrera_id}</strong></td>
+            <td><span class="badge badge-race-1">Etapa ${et.etapa_num}</span></td>
+            <td class="mono">${et.fecha}</td>
+            <td>${et.num_ciclistas} ciclistas</td>
+            <td>
+              <button class="btn btn-secondary btn-sm" onclick="viewStageDate('${et.fecha}')">
+                <span>🗺️</span> Ver Perfil
+              </button>
+            </td>
+          </tr>
+        `).join('');
+      } else {
+        tbodyStages.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-dim);">No hay etapas registradas aún.</td></tr>`;
+      }
     }
 
   } catch (err) {
@@ -324,16 +329,18 @@ function renderDashboardRaces(carrerasActivas, proximaCarrera, ultimaCarrera, fa
       const convocadosListHtml = convocados.length > 0
         ? convocados.map(a => {
             const displayName = getAthleteDisplayName(a);
-            const badgeMeta = a.rol || (a.dorsal ? `Dorsal #${a.dorsal}` : 'Convocado');
-            const weightVal = a.weight || a.peso || 70;
-            const ftpVal = a.ftp || 380;
+            const badgeMeta = a.rol || (a.dorsal ? `Dorsal #${a.dorsal}` : '');
+            const foundAth = (AppState.athletes || []).find(ath => (ath.intervals_id && ath.intervals_id === a.atleta_id) || (ath.atleta_id && ath.atleta_id === a.atleta_id));
+            const weightVal = a.weight || a.peso || (foundAth ? (foundAth.weight || foundAth.peso) : null);
+            const ftpVal = a.ftp || (foundAth ? (foundAth.ftp || foundAth.FTP) : null);
+            const statsSub = (weightVal && ftpVal) ? `(${weightVal} kg, ${ftpVal} W)` : (weightVal ? `(${weightVal} kg)` : '');
             return `
             <li class="race-roster-item">
               <div>
                 <strong>${escapeHtml(displayName)}</strong>
-                <span style="font-size: 0.8rem; color: var(--text-dim);">(${weightVal} kg, ${ftpVal} W)</span>
+                <!--${statsSub ? `<span style="font-size: 0.8rem; color: var(--text-dim);">${escapeHtml(statsSub)}</span>` : ''}-->
               </div>
-              <span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(badgeMeta)}</span>
+              <!--${badgeMeta ? `<span class="mono" style="font-size: 0.8rem; color: var(--text-muted);">${escapeHtml(badgeMeta)}</span>` : ''}-->
             </li>
           `;
           }).join('')
@@ -632,7 +639,8 @@ document.getElementById('btn-sync-api')?.addEventListener('click', async () => {
   }
   try {
     AppState.isSyncing = true;
-    document.getElementById('api-status-text').textContent = 'Sincronizando actividades nuevas...';
+    const apiStatusEl = document.getElementById('api-status-text');
+    if (apiStatusEl) apiStatusEl.textContent = 'Sincronizando actividades nuevas...';
     showToast('Iniciando sincronización de actividades nuevas...', 'info');
 
     const res = await fetch('/api/sync?solo_nuevas=true', { method: 'POST' });
@@ -646,7 +654,7 @@ document.getElementById('btn-sync-api')?.addEventListener('click', async () => {
       if (!sData.running) {
         clearInterval(pollInterval);
         AppState.isSyncing = false;
-        document.getElementById('api-status-text').textContent = 'Conectado a Intervals.icu';
+        if (apiStatusEl) apiStatusEl.textContent = 'Conectado a Intervals.icu';
         showToast(sData.message, 'success');
         loadDashboardData();
       }
@@ -2257,8 +2265,14 @@ async function openRaceHistoryModal(carreraId, carreraNombre) {
       fetch(`/api/races/${encodeURIComponent(carreraId)}/summary`)
     ]);
 
-    if (!resStages.ok) throw new Error('Error al cargar etapas históricas');
-    if (!resSummary.ok) throw new Error('Error al cargar balance de la vuelta');
+    if (!resStages.ok) {
+      const errStages = await resStages.json().catch(() => ({}));
+      throw new Error(errStages.detail || 'Error al cargar etapas históricas');
+    }
+    if (!resSummary.ok) {
+      const errSum = await resSummary.json().catch(() => ({}));
+      throw new Error(errSum.detail || 'Error al cargar balance de la vuelta');
+    }
 
     const dataStages = await resStages.json();
     const dataSummary = await resSummary.json();

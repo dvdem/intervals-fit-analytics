@@ -248,6 +248,20 @@ def init_history_db(db_path: Optional[Union[str, Path]] = None) -> Path:
                 ('tres_cantos_ciclismo_en_ruta', 'Tres Cantos Ciclismo en Ruta', 'Copa España', 'España', '2026-01-01', '2026-01-01', 1, 1, 'Inicio de temporada.');
             """)
 
+        # Migración dinámica: Desvincular de carreras oficiales aquellas actividades
+        # cuya fecha no coincida con las fechas oficiales de la carrera
+        cursor.execute("""
+            UPDATE etapas_resumen
+            SET carrera_id = 'entrenamiento',
+                nombre_carrera = 'Entrenamiento'
+            WHERE actividad_id IN (
+                SELECT e.actividad_id
+                FROM etapas_resumen e
+                JOIN carreras c ON LOWER(e.carrera_id) = LOWER(c.carrera_id)
+                WHERE e.fecha < c.fecha_inicio OR e.fecha > c.fecha_fin
+            );
+        """)
+
         conn.commit()
 
     # Inicializar tablas de autenticación y asegurar usuario admin por defecto
@@ -337,8 +351,15 @@ def guardar_resumen_etapa(
         # Si es un número/alias (ej. "1", "2") o slug, resolver contra carreras
         c_res = resolver_carrera(carrera_id_clean, fecha=fecha_str, db_path=path)
         if c_res:
-            carrera_id_clean = c_res['carrera_id']
-            nom_carrera_clean = nom_carrera_clean or c_res['nombre_carrera']
+            f_ini = c_res.get('fecha_inicio')
+            f_fin = c_res.get('fecha_fin')
+            if f_ini and f_fin and not (str(f_ini) <= str(fecha_str) <= str(f_fin)):
+                print(f"⚠️ Actividad ({fecha_str}) fuera de las fechas de la carrera '{c_res.get('nombre_carrera', carrera_id_clean)}' ({f_ini} a {f_fin}). No se asigna a datos históricos de la carrera.")
+                carrera_id_clean = 'entrenamiento'
+                nom_carrera_clean = 'Entrenamiento'
+            else:
+                carrera_id_clean = c_res['carrera_id']
+                nom_carrera_clean = nom_carrera_clean or c_res['nombre_carrera']
         else:
             nom_carrera_clean = nom_carrera_clean or carrera_id_clean.replace('_', ' ').title()
 
@@ -374,6 +395,19 @@ def guardar_resumen_etapa(
     meta_json = json.dumps(meta_dict, ensure_ascii=False)
 
     with _conectar_db(path) as conn:
+        # Si ya existe una etapa para este ciclista en la misma fecha y carrera,
+        # eliminar el registro previo y sus picos asociados para sobreescribir limpiamente.
+        c = conn.cursor()
+        c.execute("""
+            SELECT actividad_id FROM etapas_resumen 
+            WHERE atleta_id = ? AND fecha = ? AND (LOWER(carrera_id) = LOWER(?) OR LOWER(carrera_id) = 'entrenamiento' OR ? = 'entrenamiento');
+        """, (atleta_id, fecha_str, carrera_id_clean, carrera_id_clean))
+        prev_acts = [r[0] for r in c.fetchall()]
+        for prev_id in prev_acts:
+            if prev_id != actividad_id:
+                conn.execute("DELETE FROM picos_historicos WHERE actividad_id = ?;", (prev_id,))
+                conn.execute("DELETE FROM etapas_resumen WHERE actividad_id = ?;", (prev_id,))
+
         conn.execute("""
             INSERT OR REPLACE INTO etapas_resumen (
                 actividad_id, atleta_id, nombre_ciclista, carrera_id, nombre_carrera,
@@ -521,6 +555,8 @@ def obtener_historico_carrera_etapas(
 ) -> pd.DataFrame:
     """
     Devuelve la evolución etapa por etapa y el gasto energético acumulado de una carrera.
+    Filtra estrictamente para considerar solo ficheros y actividades comprendidos
+    dentro de las fechas oficiales de la carrera.
     Calcula dinámicamente mediante funciones de ventana SQL:
     - kj_acumulados: Kilojulios totales sumados etapa tras etapa
     - kj_kg_acumulados: kJ/kg acumulados a lo largo de la vuelta
@@ -531,7 +567,19 @@ def obtener_historico_carrera_etapas(
     if not path.exists():
         return pd.DataFrame()
 
-    query = """
+    c_res = resolver_carrera(carrera_id, db_path=path)
+    target_carrera_id = c_res['carrera_id'] if c_res else str(carrera_id).strip()
+    f_inicio = c_res.get('fecha_inicio') if c_res else None
+    f_fin = c_res.get('fecha_fin') if c_res else None
+
+    params = [target_carrera_id, str(carrera_id).strip()]
+    if f_inicio and f_fin:
+        filtro_fechas_sql = "AND e.fecha >= ? AND e.fecha <= ?"
+        params.extend([str(f_inicio), str(f_fin)])
+    else:
+        filtro_fechas_sql = "AND (car.fecha_inicio IS NULL OR (e.fecha >= car.fecha_inicio AND e.fecha <= car.fecha_fin))"
+
+    query = f"""
         SELECT
             e.atleta_id,
             COALESCE(c.nombre, e.nombre_ciclista) AS nombre,
@@ -563,12 +611,14 @@ def obtener_historico_carrera_etapas(
             SUM(e.desnivel_m) OVER (PARTITION BY e.atleta_id ORDER BY e.etapa_num, e.fecha) AS desnivel_acumulado
         FROM etapas_resumen e
         LEFT JOIN ciclistas c ON e.atleta_id = c.atleta_id
-        WHERE LOWER(e.carrera_id) = LOWER(?)
-        ORDER BY e.atleta_id, e.etapa_num ASC;
+        LEFT JOIN carreras car ON LOWER(car.carrera_id) = LOWER(e.carrera_id)
+        WHERE (LOWER(e.carrera_id) = LOWER(?) OR LOWER(e.carrera_id) = LOWER(?))
+        {filtro_fechas_sql}
+        ORDER BY e.atleta_id, e.etapa_num ASC, e.fecha ASC;
     """
 
     with _conectar_db(path) as conn:
-        df = pd.read_sql_query(query, conn, params=[str(carrera_id).strip()])
+        df = pd.read_sql_query(query, conn, params=params)
     return df
 
 
@@ -579,12 +629,25 @@ def obtener_resumen_acumulado_carrera(
     """
     Devuelve la tabla resumen final por ciclista al término de la carrera por etapas,
     ordenada por mayor gasto energético total (kJ).
+    Filtra estrictamente para considerar solo ficheros y actividades dentro de las fechas oficiales de carrera.
     """
     path = _obtener_db_path(db_path)
     if not path.exists():
         return pd.DataFrame()
 
-    query = """
+    c_res = resolver_carrera(carrera_id, db_path=path)
+    target_carrera_id = c_res['carrera_id'] if c_res else str(carrera_id).strip()
+    f_inicio = c_res.get('fecha_inicio') if c_res else None
+    f_fin = c_res.get('fecha_fin') if c_res else None
+
+    params = [target_carrera_id, str(carrera_id).strip()]
+    if f_inicio and f_fin:
+        filtro_fechas_sql = "AND e.fecha >= ? AND e.fecha <= ?"
+        params.extend([str(f_inicio), str(f_fin)])
+    else:
+        filtro_fechas_sql = "AND (car.fecha_inicio IS NULL OR (e.fecha >= car.fecha_inicio AND e.fecha <= car.fecha_fin))"
+
+    query = f"""
         SELECT
             e.atleta_id,
             COALESCE(c.nombre, e.nombre_ciclista) AS nombre,
@@ -600,13 +663,15 @@ def obtener_resumen_acumulado_carrera(
             ROUND(AVG(e.if_val), 2) AS media_if
         FROM etapas_resumen e
         LEFT JOIN ciclistas c ON e.atleta_id = c.atleta_id
-        WHERE LOWER(e.carrera_id) = LOWER(?)
+        LEFT JOIN carreras car ON LOWER(car.carrera_id) = LOWER(e.carrera_id)
+        WHERE (LOWER(e.carrera_id) = LOWER(?) OR LOWER(e.carrera_id) = LOWER(?))
+        {filtro_fechas_sql}
         GROUP BY e.atleta_id
         ORDER BY total_kj DESC;
     """
 
     with _conectar_db(path) as conn:
-        df = pd.read_sql_query(query, conn, params=[str(carrera_id).strip()])
+        df = pd.read_sql_query(query, conn, params=params)
     return df
 
 

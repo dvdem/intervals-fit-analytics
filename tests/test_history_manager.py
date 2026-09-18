@@ -362,6 +362,101 @@ class TestHistoryManager(unittest.TestCase):
         val_ids = [a['atleta_id'] for a in ath_val_list]
         self.assertIn('ath_val1', val_ids)
 
+    def test_solo_datos_fechas_carrera(self):
+        """Verifica que para los datos históricos de una carrera solo se toman en cuenta fechas de carrera."""
+        # 1. Registrar una carrera oficial de 3 etapas
+        carrera_info = {
+            'carrera_id': 'vuelta_andalucia_2026',
+            'nombre_carrera': 'Vuelta a Andalucía 2026',
+            'fecha_inicio': '2026-02-18',
+            'fecha_fin': '2026-02-20',
+            'total_etapas': 3
+        }
+        guardar_carrera(carrera_info, atletas_ids=['rider_1'], db_path=self.db_path)
+
+        # 2. Guardar actividades dentro de las fechas de carrera
+        st1 = {'nombre': 'Rider 1', 'atleta_id': 'rider_1', 'distancia_km': 150.0, 'kilojulios_total': 3000, 'tss_total': 180, 'tiempo_mov_seg': 14400}
+        st2 = {'nombre': 'Rider 1', 'atleta_id': 'rider_1', 'distancia_km': 160.0, 'kilojulios_total': 3200, 'tss_total': 190, 'tiempo_mov_seg': 15000}
+        st3 = {'nombre': 'Rider 1', 'atleta_id': 'rider_1', 'distancia_km': 170.0, 'kilojulios_total': 3400, 'tss_total': 200, 'tiempo_mov_seg': 16000}
+
+        guardar_resumen_etapa(st1, carrera_id='vuelta_andalucia_2026', etapa_num=1, fecha='2026-02-18', db_path=self.db_path)
+        guardar_resumen_etapa(st2, carrera_id='vuelta_andalucia_2026', etapa_num=2, fecha='2026-02-19', db_path=self.db_path)
+        guardar_resumen_etapa(st3, carrera_id='vuelta_andalucia_2026', etapa_num=3, fecha='2026-02-20', db_path=self.db_path)
+
+        # 3. Intentar guardar un entrenamiento previo (fuera de fecha: 2026-02-15)
+        st_prev = {'nombre': 'Rider 1', 'atleta_id': 'rider_1', 'distancia_km': 60.0, 'kilojulios_total': 1200, 'tss_total': 70, 'tiempo_mov_seg': 7200}
+        act_prev_id = guardar_resumen_etapa(st_prev, carrera_id='vuelta_andalucia_2026', etapa_num=1, fecha='2026-02-15', db_path=self.db_path)
+
+        # Verificar que guardar_resumen_etapa no lo asignó a vuelta_andalucia_2026
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT carrera_id FROM etapas_resumen WHERE actividad_id = ?", (act_prev_id,))
+        row_prev = cur.fetchone()
+        self.assertEqual(row_prev[0], 'entrenamiento')
+
+        # 4. Insertar manualmente un registro desfasado con fecha posterior (2026-02-25) asignado a la carrera
+        cur.execute("""
+            INSERT INTO etapas_resumen (
+                actividad_id, atleta_id, nombre_ciclista, carrera_id, nombre_carrera,
+                etapa_num, fecha, temporada, distancia_km, tiempo_mov_s, pot_media_w, kj_total, tss
+            ) VALUES (
+                'rider_1_fake_post', 'rider_1', 'Rider 1', 'vuelta_andalucia_2026', 'Vuelta a Andalucía 2026',
+                4, '2026-02-25', 2026, 100.0, 9000, 200, 2000, 100
+            );
+        """)
+        conn.commit()
+        conn.close()
+
+        # 5. Consultar histórico etapa por etapa: SOLO deben figurar las 3 etapas oficiales
+        df_etapas = obtener_historico_carrera_etapas('vuelta_andalucia_2026', db_path=self.db_path)
+        self.assertEqual(len(df_etapas), 3)
+        fechas = list(df_etapas['fecha'])
+        self.assertEqual(fechas, ['2026-02-18', '2026-02-19', '2026-02-20'])
+        self.assertNotIn('2026-02-15', fechas)
+        self.assertNotIn('2026-02-25', fechas)
+
+        # 6. Consultar resumen acumulado de la carrera: etapas_disputadas debe ser exactamente 3
+        df_resumen = obtener_resumen_acumulado_carrera('vuelta_andalucia_2026', db_path=self.db_path)
+        self.assertEqual(len(df_resumen), 1)
+        self.assertEqual(df_resumen.iloc[0]['etapas_disputadas'], 3)
+        self.assertEqual(df_resumen.iloc[0]['total_kj'], 3000 + 3200 + 3400)
+        self.assertEqual(df_resumen.iloc[0]['total_km'], 150.0 + 160.0 + 170.0)
+
+        # 7. Ejecutar migración en init_history_db y verificar limpieza del registro posterior
+        init_history_db(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute("SELECT carrera_id FROM etapas_resumen WHERE actividad_id = 'rider_1_fake_post'")
+        row_clean = cur.fetchone()
+        self.assertEqual(row_clean[0], 'entrenamiento')
+        conn.close()
+
+    def test_obtener_fecha_archivo_fit(self):
+        """Verifica la extracción de fecha de un archivo .fit y el filtrado por fechas de carrera."""
+        from src.interactive_profile import obtener_fecha_archivo_fit, buscar_fit_local_ciclista
+        fit_path = Path("data/today_race/19623637329.fit")
+        if fit_path.exists():
+            f_date = obtener_fecha_archivo_fit(fit_path)
+            self.assertEqual(f_date, '2026-08-06')
+
+            # Búsqueda local con rango de carrera que no coincide
+            res_fuera = buscar_fit_local_ciclista(
+                nombre="Adrian Fajardo",
+                act_id="19623637329",
+                directorios_busqueda=[Path("data/today_race")],
+                rango_fechas=('2026-09-18', '2026-09-20')
+            )
+            self.assertIsNone(res_fuera)
+
+            # Búsqueda local con fecha correcta
+            res_dentro = buscar_fit_local_ciclista(
+                nombre="Adrian Fajardo",
+                act_id="19623637329",
+                directorios_busqueda=[Path("data/today_race")],
+                fecha_objetivo='2026-08-06'
+            )
+            self.assertIsNotNone(res_dentro)
+
 
 if __name__ == '__main__':
     unittest.main()

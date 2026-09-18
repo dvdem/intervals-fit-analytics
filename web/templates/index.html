@@ -17,8 +17,8 @@
     <div class="brand-header">
       <div class="brand-logo">⚡</div>
       <div>
-        <div class="brand-title">Intervals Fit</div>
-        <div class="brand-subtitle">Pro Cycling Analytics</div>
+        <div class="brand-title">ANÁLITICA DATOS</div>
+        <div class="brand-subtitle">PRO CYCLING PLATFORM</div>
       </div>
     </div>
 
@@ -82,7 +82,7 @@
             <span class="user-avatar" id="topbar-user-avatar">👑</span>
             <div class="user-info-text">
               <span class="user-name" id="topbar-username">admin</span>
-              <span class="badge-role" id="topbar-user-role">Administrador</span>
+              <!--span class="badge-role" id="topbar-user-role">Administrador</span-->
             </div>
           </div>
           <button class="btn btn-secondary btn-sm btn-logout" id="btn-logout" title="Cerrar Sesión">
@@ -99,22 +99,22 @@
           <span>🔄</span>
           <span>Sincronizar Intervals</span>
         </button>
-        <div class="badge-status">
+        <!--div class="badge-status">
           <span class="badge-dot"></span>
           <span id="api-status-text">Conectado a Intervals.icu</span>
-        </div>
+        </div-->
       </div>
     </header>
 
     <div class="content-area">
 
       <!-- Banner Informativo para Rol Visor -->
-      <div id="visor-notice-banner" class="visor-notice-banner" style="display: none;">
+      <!--div id="visor-notice-banner" class="visor-notice-banner" style="display: none;">
         <span class="visor-banner-icon">👁️</span>
         <div class="visor-banner-content">
           <strong>Modo Visor (Solo Lectura):</strong> Tu perfil tiene permisos exclusivos de visualización y consulta. Las operaciones de registro, edición y eliminación están reservadas para Editores y Administradores.
         </div>
-      </div>
+      </div-->
 
       <!-- ===================================================================
            PESTAÑA 1: DASHBOARD GENERAL
@@ -175,7 +175,7 @@
         </div>
 
         <!-- Últimas Etapas Registradas -->
-        <div class="panel">
+        <!--div class="panel">
           <div class="panel-header">
             <h2 class="panel-title"><span>📅</span> Historial Reciente de Etapas en la Base de Datos</h2>
           </div>
@@ -195,7 +195,7 @@
               </tbody>
             </table>
           </div>
-        </div>
+        </div-->
       </section>
 
       <!-- ===================================================================
@@ -502,33 +502,7 @@
            PESTAÑA 5: ADMINISTRACIÓN DE EQUIPO Y CARRERAS
            =================================================================== -->
       <section id="tab-admin" class="tab-view">
-        <!-- Tarjeta de Gestión de Ciclistas -->
-        <div class="panel">
-          <div class="panel-header">
-            <h2 class="panel-title"><span>👥</span> Directorio y Gestión de Ciclistas del Equipo</h2>
-            <button class="btn btn-primary btn-sm" id="btn-open-add-athlete-modal">
-              <span>➕</span> Dar de Alta Ciclista
-            </button>
-          </div>
-
-          <div class="table-responsive">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Nombre</th>
-                  <th>Intervals ID</th>
-                  <th>Peso (kg)</th>
-                  <th>FTP (W)</th>
-                  <th>Biela (mm)</th>
-                  <th>Acciones</th>
-                </tr>
-              </thead>
-              <tbody id="tbody-athletes-admin">
-                <!-- Se llena dinámicamente -->
-              </tbody>
-            </table>
-          </div>
-        </div>
+       
 
         <!-- Calendario de Competiciones y Convocatorias Históricas -->
         <div class="panel">
@@ -568,6 +542,33 @@
                 </tr>
               </thead>
               <tbody id="tbody-races-admin">
+                <!-- Se llena dinámicamente -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+         <!-- Tarjeta de Gestión de Ciclistas -->
+        <div class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title"><span>👥</span> Directorio y Gestión de Ciclistas del Equipo</h2>
+            <button class="btn btn-primary btn-sm" id="btn-open-add-athlete-modal">
+              <span>➕</span> Dar de Alta Ciclista
+            </button>
+          </div>
+
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Intervals ID</th>
+                  <th>Peso (kg)</th>
+                  <th>FTP (W)</th>
+                  <th>Biela (mm)</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody id="tbody-athletes-admin">
                 <!-- Se llena dinámicamente -->
               </tbody>
             </table>

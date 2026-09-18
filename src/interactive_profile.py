@@ -2883,7 +2883,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <button class="tab-btn" data-metric="hr">Pulso</button>
                     <button class="tab-btn" data-metric="cda">CdA (m²)</button>
                     <button class="tab-btn" data-metric="trq">Torque (N·m)</button>
-                    <button class="tab-btn" data-metric="aepf">Fuerza Pedal (N)</button>
+                    <!--button class="tab-btn" data-metric="aepf">Fuerza Pedal (N)</button-->
                     <!--button class="tab-btn" data-metric="temp">Temperatura (°C)</button>
                     <button class="tab-btn" data-metric="headwind">Viento Efectivo (km/h)</button-->
                 </div>
@@ -8238,6 +8238,16 @@ def generar_dashboard_perfil_interactivo(
                 ts_series = ts_series.dt.tz_convert('UTC').dt.tz_localize(None)
             df_fit['timestamp'] = ts_series
 
+        # Filtrar si la fecha del archivo FIT no coincide con las fechas de la carrera
+        if carrera_info and carrera_info.get('fecha_inicio') and carrera_info.get('fecha_fin'):
+            f_ini = str(carrera_info['fecha_inicio'])
+            f_fin = str(carrera_info['fecha_fin'])
+            if 'timestamp' in df_fit.columns and len(df_fit) > 0 and pd.notna(df_fit['timestamp'].iloc[0]):
+                f_act = df_fit['timestamp'].iloc[0].strftime('%Y-%m-%d')
+                if not (f_ini <= f_act <= f_fin):
+                    print(f"⚠️ Omitiendo fichero de {nombre} ({f_act}): no coincide con las fechas oficiales de '{carrera_info['nombre_carrera']}' ({f_ini} a {f_fin}).")
+                    continue
+
         ciclistas_raw.append({
             'df': df_fit,
             'nombre': nombre,
@@ -8691,6 +8701,14 @@ def generar_dashboard_perfil_interactivo(
                 if match_etapa:
                     etapa_num_res = int(match_etapa.group(1))
 
+            if carrera_info and carrera_info.get('fecha_inicio') and carrera_info.get('fecha_fin'):
+                f_ini = str(carrera_info['fecha_inicio'])
+                f_fin = str(carrera_info['fecha_fin'])
+                if not (f_ini <= str(fecha_etapa) <= f_fin):
+                    print(f"⚠️ Fecha de etapa ({fecha_etapa}) fuera de las fechas oficiales de '{carrera_info['nombre_carrera']}' ({f_ini} a {f_fin}). Se guarda como entrenamiento.")
+                    carrera_id_res = 'entrenamiento'
+                    nom_carrera_db = 'Entrenamiento'
+
             guardados_cnt = 0
             for c in ciclistas_proc:
                 if 'stats' in c:
@@ -8728,15 +8746,38 @@ def generar_dashboard_perfil_interactivo(
     return out_path
 
 
+def obtener_fecha_archivo_fit(ruta_fit: Union[str, Path]) -> Optional[str]:
+    """
+    Obtiene rápidamente la fecha (YYYY-MM-DD) del primer timestamp de un archivo .fit.
+    Retorna None si no se puede leer o no contiene timestamps válidos.
+    """
+    try:
+        import fitdecode
+        with fitdecode.FitReader(str(ruta_fit)) as fit:
+            for frame in fit:
+                if frame.frame_type == fitdecode.FIT_FRAME_DATA and frame.name == 'record':
+                    ts = frame.get_value('timestamp')
+                    if ts is not None:
+                        if hasattr(ts, 'strftime'):
+                            return ts.strftime('%Y-%m-%d')
+                        return str(ts)[:10]
+    except Exception:
+        pass
+    return None
+
+
 def buscar_fit_local_ciclista(
     nombre: str,
     atleta_id: str = "",
     act_id: str = "",
-    directorios_busqueda: Optional[List[Union[str, Path]]] = None
+    directorios_busqueda: Optional[List[Union[str, Path]]] = None,
+    fecha_objetivo: Optional[str] = None,
+    rango_fechas: Optional[Tuple[str, str]] = None
 ) -> Optional[Path]:
     """
     Busca en las carpetas locales (por defecto data/today_race/ y data/) un archivo .fit
     que pertenezca al ciclista indicado por nombre, ID de atleta o ID de actividad.
+    Filtra estrictamente por fecha objetivo o rango de fechas de carrera si se especifican.
     Especialmente utilizado para actividades cuyo origen sea STRAVA.
     """
     import re
@@ -8748,6 +8789,22 @@ def buscar_fit_local_ciclista(
         p = Path(d)
         if p.exists() and p.is_dir():
             candidatos_fits.extend(list(p.glob("*.fit")) + list(p.glob("*.FIT")))
+
+    if not candidatos_fits:
+        return None
+
+    # Filtrar por fecha de carrera si se especifica
+    if fecha_objetivo or rango_fechas:
+        fits_validos = []
+        for f in candidatos_fits:
+            f_date = obtener_fecha_archivo_fit(f)
+            if f_date:
+                if fecha_objetivo and f_date != str(fecha_objetivo):
+                    continue
+                if rango_fechas and not (str(rango_fechas[0]) <= f_date <= str(rango_fechas[1])):
+                    continue
+            fits_validos.append(f)
+        candidatos_fits = fits_validos
 
     if not candidatos_fits:
         return None
@@ -8959,12 +9016,24 @@ def descargar_o_recopilar_fits_etapa(
                     items_encontrados.append(fit_local)
             return items_encontrados, fits_temporales_api
 
-        # Determinar la fecha de carrera más reciente
-        fechas_candidatas = [x['fecha'] for x in todas_acts if x['fecha']]
-        fecha_str = max(fechas_candidatas)
+        # Determinar la fecha de carrera más reciente dentro del calendario si existe
+        if carrera_info and carrera_info.get('fecha_inicio') and carrera_info.get('fecha_fin'):
+            f_ini = str(carrera_info['fecha_inicio'])
+            f_fin = str(carrera_info['fecha_fin'])
+            fechas_candidatas = [x['fecha'] for x in todas_acts if x['fecha'] and (f_ini <= x['fecha'] <= f_fin)]
+            if not fechas_candidatas:
+                hoy_str = datetime.now().strftime('%Y-%m-%d')
+                fecha_str = hoy_str if (f_ini <= hoy_str <= f_fin) else f_ini
+            else:
+                fecha_str = max(fechas_candidatas)
+        else:
+            fechas_candidatas = [x['fecha'] for x in todas_acts if x['fecha']]
+            fecha_str = max(fechas_candidatas) if fechas_candidatas else datetime.now().strftime('%Y-%m-%d')
         print(f"📅 Última etapa de carrera detectada automáticamente: {fecha_str}")
     else:
         print(f"📅 Fecha objetivo de etapa: {fecha_str}")
+
+    rango_carrera_tupla = (str(carrera_info['fecha_inicio']), str(carrera_info['fecha_fin'])) if carrera_info and carrera_info.get('fecha_inicio') and carrera_info.get('fecha_fin') else None
 
     # 3. Descargar las actividades de la fecha seleccionada para cada ciclista
     for a in atletas:
@@ -9028,7 +9097,7 @@ def descargar_o_recopilar_fits_etapa(
                 items_encontrados.append(local_fit)
             else:
                 print(f"      📁 Buscando archivo .fit local en '{cache_path}' para {name}...")
-                fit_local = buscar_fit_local_ciclista(name, aid, act_id, [cache_path, Path("data")])
+                fit_local = buscar_fit_local_ciclista(name, aid, act_id, [cache_path, Path("data")], fecha_objetivo=fecha_str, rango_fechas=rango_carrera_tupla)
                 if fit_local and fit_local.exists() and fit_local.stat().st_size > 1000:
                     print(f"      ✅ Encontrado .fit local de Strava: {fit_local.name}")
                     items_encontrados.append(fit_local)
@@ -9045,14 +9114,26 @@ def descargar_o_recopilar_fits_etapa(
                 fits_temporales_api.append(local_fit)
             else:
                 # Fallback alternativo
-                fit_local = buscar_fit_local_ciclista(name, aid, act_id, [cache_path, Path("data")])
+                fit_local = buscar_fit_local_ciclista(name, aid, act_id, [cache_path, Path("data")], fecha_objetivo=fecha_str, rango_fechas=rango_carrera_tupla)
                 if fit_local and fit_local.exists() and fit_local.stat().st_size > 1000:
                     print(f"      ✅ Encontrado .fit local alternativo: {fit_local.name}")
                     items_encontrados.append(fit_local)
 
     # Si no se encontró nada por API, usar archivos existentes en cache_path / data
     if not items_encontrados:
-        items_encontrados = [f for f in list(cache_path.glob("*.fit")) + list(Path("data").glob("*.fit")) if f.stat().st_size > 1000]
+        todos_fits_locales = [f for f in list(cache_path.glob("*.fit")) + list(cache_path.glob("*.FIT")) + list(Path("data").glob("*.fit")) + list(Path("data").glob("*.FIT")) if f.stat().st_size > 1000]
+        fits_filtrados = []
+        for f in todos_fits_locales:
+            f_fecha = obtener_fecha_archivo_fit(f)
+            if f_fecha:
+                if rango_carrera_tupla and not (rango_carrera_tupla[0] <= f_fecha <= rango_carrera_tupla[1]):
+                    continue
+                if fecha_str and f_fecha != str(fecha_str):
+                    continue
+            elif rango_carrera_tupla or fecha_str:
+                continue
+            fits_filtrados.append(f)
+        items_encontrados = fits_filtrados
 
     # Quitar duplicados preservando orden
     unicos = []

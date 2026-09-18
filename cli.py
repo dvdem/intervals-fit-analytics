@@ -565,7 +565,8 @@ def cmd_interactive_profile(args):
             activity_id=getattr(args, 'activity_id', None),
             ultima_individual=getattr(args, 'ultima_individual', False),
             solo_carrera=solo_carrera,
-            cache_dir=cache_dir
+            cache_dir=cache_dir,
+            carrera_id=getattr(args, 'carrera', None)
         )
 
     if not fits_a_procesar:
@@ -598,6 +599,7 @@ def cmd_interactive_profile(args):
     # Identificar competiciones del calendario
     carreras_detectadas = []
     carrera_arg = getattr(args, 'carrera', None)
+    c_res = None
     if carrera_arg:
         c_res = resolver_carrera(carrera_arg)
         if c_res:
@@ -622,6 +624,7 @@ def cmd_interactive_profile(args):
             roster_df=roster_df,
             client=client,
             solo_carrera=solo_carrera,
+            carrera_id=c_res['carrera_id'] if c_res else carrera_arg,
             titulo=args.titulo,
             output_html=out_html,
             output_pdf=out_pdf,

@@ -11,6 +11,7 @@ import sys
 import os
 import re
 import json
+import math
 import sqlite3
 import shutil
 from pathlib import Path
@@ -627,24 +628,23 @@ def get_dashboard_summary(current_user: Dict[str, Any] = Depends(get_current_use
     # Obtener ultimas etapas registradas
     ultimas_etapas = []
     try:
-        conn = sqlite3.connect(HISTORY_DB_PATH)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT fecha, carrera_id, nom_carrera, etapa_num, COUNT(DISTINCT atleta_id) as num_ciclistas
-            FROM resumen_etapas
-            GROUP BY fecha, carrera_id
-            ORDER BY fecha DESC
-            LIMIT 10
-        """)
-        for row in cur.fetchall():
-            ultimas_etapas.append({
-                "fecha": row[0],
-                "carrera_id": row[1] or "",
-                "nombre_carrera": row[2] or row[1] or "Carrera",
-                "etapa_num": row[3] or 1,
-                "num_ciclistas": row[4]
-            })
-        conn.close()
+        with _conectar_db(HISTORY_DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT fecha, carrera_id, nombre_carrera, etapa_num, COUNT(DISTINCT atleta_id) as num_ciclistas
+                FROM etapas_resumen
+                GROUP BY fecha, carrera_id
+                ORDER BY fecha DESC
+                LIMIT 10
+            """)
+            for row in cur.fetchall():
+                ultimas_etapas.append({
+                    "fecha": row[0],
+                    "carrera_id": row[1] or "",
+                    "nombre_carrera": row[2] or row[1] or "Carrera",
+                    "etapa_num": row[3] or 1,
+                    "num_ciclistas": row[4]
+                })
     except Exception:
         pass
 
@@ -931,23 +931,44 @@ def update_race_group(grupo_id: int, payload: RaceGroupUpdateRequest, current_us
     return {"status": "ok", "message": f"Configuración de Carrera para Grupo {grupo_id} guardada correctamente."}
 
 
+def _limpiar_valor_json(v: Any) -> Any:
+    """Convierte NaN, Inf y valores nulos de pandas/numpy a None para serialización JSON estándar."""
+    if v is None:
+        return None
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    if pd.isna(v):
+        return None
+    return v
+
+
+def _df_a_registros_json(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Convierte un DataFrame a una lista de diccionarios 100% compatible con JSON (sin NaNs)."""
+    if df.empty:
+        return []
+    records = df.to_dict(orient="records")
+    for r in records:
+        for k, v in r.items():
+            r[k] = _limpiar_valor_json(v)
+    return records
+
+
 @app.get("/api/races/{carrera_id}/history")
 def get_race_history(carrera_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve la evolución etapa por etapa y métricas acumuladas de una carrera."""
-    df = obtener_historico_carrera_etapas(carrera_id)
+    df = obtener_historico_carrera_etapas(carrera_id, db_path=HISTORY_DB_PATH)
     if df.empty:
         with _conectar_db(HISTORY_DB_PATH) as conn:
             c = conn.cursor()
             c.execute("SELECT DISTINCT carrera_id FROM etapas_resumen WHERE LOWER(carrera_id) LIKE ? LIMIT 1;", (f"%{carrera_id.lower()}%",))
             m = c.fetchone()
             if m:
-                df = obtener_historico_carrera_etapas(m[0])
+                df = obtener_historico_carrera_etapas(m[0], db_path=HISTORY_DB_PATH)
 
     if df.empty:
         return {"carrera_id": carrera_id, "total_etapas": 0, "total_registros": 0, "ciclistas": [], "etapas": []}
 
-    df_clean = df.where(pd.notnull(df), None)
-    records = df_clean.to_dict(orient="records")
+    records = _df_a_registros_json(df)
     for r in records:
         if "tss_acumulado" in r and "tss_acumulados" not in r:
             r["tss_acumulados"] = r["tss_acumulado"]
@@ -969,20 +990,19 @@ def get_race_history(carrera_id: str, current_user: Dict[str, Any] = Depends(get
 @app.get("/api/races/{carrera_id}/summary")
 def get_race_accumulated_summary(carrera_id: str, current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve el balance consolidado por ciclista al término de la carrera."""
-    df = obtener_resumen_acumulado_carrera(carrera_id)
+    df = obtener_resumen_acumulado_carrera(carrera_id, db_path=HISTORY_DB_PATH)
     if df.empty:
         with _conectar_db(HISTORY_DB_PATH) as conn:
             c = conn.cursor()
             c.execute("SELECT DISTINCT carrera_id FROM etapas_resumen WHERE LOWER(carrera_id) LIKE ? LIMIT 1;", (f"%{carrera_id.lower()}%",))
             m = c.fetchone()
             if m:
-                df = obtener_resumen_acumulado_carrera(m[0])
+                df = obtener_resumen_acumulado_carrera(m[0], db_path=HISTORY_DB_PATH)
 
     if df.empty:
         return {"carrera_id": carrera_id, "total_ciclistas": 0, "total_atletas": 0, "resumen": []}
 
-    df_clean = df.where(pd.notnull(df), None)
-    records = df_clean.to_dict(orient="records")
+    records = _df_a_registros_json(df)
     for r in records:
         if "nombre" in r and "atleta_nombre" not in r:
             r["atleta_nombre"] = r["nombre"]
@@ -1470,12 +1490,25 @@ def analyze_stage(payload: StageAnalyzeRequest, current_user: Dict[str, Any] = D
     if not fit_paths:
         raise HTTPException(status_code=404, detail=f"No se encontraron actividades ni archivos FIT para la fecha '{fecha_str}'.")
 
-    # Generar el perfil interactivo HTML
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Generar el perfil interactivo HTML (sobreescribiendo si ya existe uno de la misma fecha y carrera)
     slug_file = f"_{carrera_target}" if carrera_target else ""
-    out_html = OUTPUT_DIR / f"perfil_interactivo_{fecha_str}{slug_file}_{timestamp}.html"
-    out_pdf = OUTPUT_DIR / f"informe_etapa_{fecha_str}{slug_file}_{timestamp}.pdf" if payload.generar_pdf else None
-    out_docx = OUTPUT_DIR / f"informe_etapa_{fecha_str}{slug_file}_{timestamp}.docx" if payload.generar_docx else None
+    out_html = OUTPUT_DIR / f"perfil_interactivo_{fecha_str}{slug_file}.html"
+    out_pdf = OUTPUT_DIR / f"informe_etapa_{fecha_str}{slug_file}.pdf" if payload.generar_pdf else None
+    out_docx = OUTPUT_DIR / f"informe_etapa_{fecha_str}{slug_file}.docx" if payload.generar_docx else None
+
+    # Sobreescribir cualquier versión previa de la misma fecha y carrera (incluyendo archivos con timestamp)
+    patrones_limpieza = [
+        f"*perfil_interactivo_{fecha_str}{slug_file}*",
+        f"*informe_etapa_{fecha_str}{slug_file}*",
+        f"*etapa_{fecha_str}{slug_file}*"
+    ]
+    for patron in patrones_limpieza:
+        for old_f in OUTPUT_DIR.glob(patron):
+            if old_f.resolve() not in [out_html.resolve(), (out_pdf.resolve() if out_pdf else None), (out_docx.resolve() if out_docx else None)]:
+                try:
+                    old_f.unlink()
+                except Exception:
+                    pass
 
     try:
         html_res = generar_dashboard_perfil_interactivo(

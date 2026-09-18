@@ -331,7 +331,19 @@ class TestWebAPI(unittest.TestCase):
         self.assertIn("kj_totales", first_athlete)
         self.assertIn("tss_total", first_athlete)
 
-        # 3. Carrera inexistente debe responder 200 con lista vacía
+        # 3. Carrera con valores nulos/NaN (ej. huangsan con torque_media_nm nulo)
+        res_huang = self.client.get("/api/races/huangsan/history")
+        self.assertEqual(res_huang.status_code, 200)
+        huang_data = res_huang.json()
+        self.assertGreater(huang_data["total_registros"], 0)
+        self.assertIn("etapas", huang_data)
+
+        res_huang_sum = self.client.get("/api/races/huangsan/summary")
+        self.assertEqual(res_huang_sum.status_code, 200)
+        huang_sum_data = res_huang_sum.json()
+        self.assertGreater(huang_sum_data["total_atletas"], 0)
+
+        # 4. Carrera inexistente debe responder 200 con lista vacía
         res_empty = self.client.get("/api/races/carrera_no_existente_999/history")
         self.assertEqual(res_empty.status_code, 200)
         self.assertEqual(res_empty.json()["total_registros"], 0)
@@ -436,6 +448,96 @@ class TestWebAPI(unittest.TestCase):
             self.assertEqual(data["status"], "ok")
             self.assertIn("archivos", data)
             self.assertIn("html", data["archivos"])
+
+    def test_stage_analyze_overwrites_existing_profile_same_date(self):
+        """Verifica que al generar un perfil de etapa se sobreescriba si ya existe uno de la misma fecha/carrera."""
+        from unittest.mock import patch
+        from config import OUTPUT_DIR
+
+        test_date = "2026-08-06"
+        carrera_id = "test_carrera_overwrite"
+        target_html = OUTPUT_DIR / f"perfil_interactivo_{test_date}_{carrera_id}.html"
+        old_timestamped = OUTPUT_DIR / f"perfil_interactivo_{test_date}_{carrera_id}_20260806_112233.html"
+
+        # Crear archivos previos de prueba
+        target_html.write_text("contenido viejo", encoding="utf-8")
+        old_timestamped.write_text("timestamped viejo", encoding="utf-8")
+
+        def fake_generar(output_html, **kwargs):
+            Path(output_html).write_text("contenido nuevo sobreescrito", encoding="utf-8")
+            return Path(output_html)
+
+        with patch("web.app.generar_dashboard_perfil_interactivo", side_effect=fake_generar):
+            payload = {
+                "fecha": test_date,
+                "carrera_id": carrera_id,
+                "titulo": "Test Overwrite",
+                "generar_pdf": False,
+                "generar_docx": False
+            }
+            res = self.client.post("/api/stage/analyze", json=payload)
+            self.assertEqual(res.status_code, 200)
+
+        # Verificar que el viejo timestamped fue eliminado
+        self.assertFalse(old_timestamped.exists())
+        # Verificar que el target principal fue sobreescrito con el nuevo contenido
+        self.assertTrue(target_html.exists())
+        self.assertEqual(target_html.read_text(encoding="utf-8"), "contenido nuevo sobreescrito")
+
+        # Limpiar
+        if target_html.exists():
+            target_html.unlink()
+        if old_timestamped.exists():
+            old_timestamped.unlink()
+
+    def test_guardar_resumen_etapa_overwrites_same_date(self):
+        """Verifica que guardar_resumen_etapa sobreescriba actividades previas del mismo ciclista y fecha."""
+        from src.history_manager import guardar_resumen_etapa, _conectar_db, HISTORY_DB_PATH
+
+        test_ath = "test_overwriter_cyclist"
+        test_fecha = "2026-09-18"
+        test_carrera = "test_race_overwrite"
+
+        stats_v1 = {
+            'atleta_id': test_ath,
+            'nombre': 'Ciclista Overwrite',
+            'distancia_km': 100.0,
+            'kilojulios_total': 2000.0,
+            'actividad_id': 'act_v1_sync'
+        }
+        stats_v2 = {
+            'atleta_id': test_ath,
+            'nombre': 'Ciclista Overwrite',
+            'distancia_km': 120.0,
+            'kilojulios_total': 2500.0,
+            'actividad_id': 'act_v2_analyzed'
+        }
+
+        # 1. Guardar versión 1
+        guardar_resumen_etapa(stats_v1, carrera_id=test_carrera, etapa_num=1, fecha=test_fecha)
+
+        # 2. Guardar versión 2 para la misma fecha y carrera
+        guardar_resumen_etapa(stats_v2, carrera_id=test_carrera, etapa_num=1, fecha=test_fecha)
+
+        # 3. Comprobar que solo existe 1 registro y es el v2
+        with _conectar_db(HISTORY_DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT actividad_id, distancia_km, kj_total 
+                FROM etapas_resumen 
+                WHERE atleta_id = ? AND fecha = ?;
+            """, (test_ath, test_fecha))
+            rows = cur.fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0], 'act_v2_analyzed')
+            self.assertEqual(rows[0][1], 120.0)
+            self.assertEqual(rows[0][2], 2500.0)
+
+            # Limpiar registro de test
+            conn.execute("DELETE FROM picos_historicos WHERE actividad_id = 'act_v2_analyzed';")
+            conn.execute("DELETE FROM etapas_resumen WHERE atleta_id = ?;", (test_ath,))
+            conn.execute("DELETE FROM ciclistas WHERE atleta_id = ?;", (test_ath,))
+            conn.commit()
 
 
 if __name__ == "__main__":
