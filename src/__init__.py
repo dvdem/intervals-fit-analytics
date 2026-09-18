@@ -34,7 +34,9 @@ from .interactive_profile import (
     generar_dashboard_perfil_interactivo,
     procesar_telemetria_ciclista,
     buscar_fit_local_ciclista,
-    descargar_o_recopilar_fits_etapa
+    descargar_o_recopilar_fits_etapa,
+    generar_nombre_archivo_analisis,
+    limpiar_slug_archivo
 )
 from .torque_analytics import (
     calcular_torque_seguro,
@@ -99,6 +101,8 @@ __all__ = [
     "procesar_telemetria_ciclista",
     "buscar_fit_local_ciclista",
     "descargar_o_recopilar_fits_etapa",
+    "generar_nombre_archivo_analisis",
+    "limpiar_slug_archivo",
     "calcular_rho_preciso",
     "calcular_bearing_ciclista",
     "calcular_viento_efectivo",

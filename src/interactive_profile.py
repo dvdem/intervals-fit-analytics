@@ -8117,6 +8117,86 @@ def sincronizar_ciclistas_ultimo_punto_comun(
     return punto_comun_fin, ciclistas_recortados_fin
 
 
+def limpiar_slug_archivo(texto: Optional[str]) -> str:
+    """Normaliza texto eliminando acentos, caracteres especiales y reemplazando espacios/separadores por guion bajo."""
+    if not texto:
+        return ""
+    norm = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8')
+    norm = re.sub(r'[\s\-/\\|:;,.\'"`]+', '_', norm)
+    norm = re.sub(r'[^A-Za-z0-9_]', '', norm)
+    norm = re.sub(r'_+', '_', norm).strip('_')
+    return norm
+
+
+def generar_nombre_archivo_analisis(
+    nombre_vuelta: Optional[str] = None,
+    titulo: Optional[str] = None,
+    fecha: Optional[Union[str, datetime]] = None,
+    extension: str = ""
+) -> str:
+    """
+    Genera el nombre de archivo estandarizado con el formato:
+    Analisis_{nombrevuelta}_{titulo}_{fecha}{extension}
+    
+    Ejemplos:
+        generar_nombre_archivo_analisis("Vuelta a Burgos", "Etapa 2", "2026-08-06", "html")
+        -> "Analisis_Vuelta_a_Burgos_Etapa_2_2026-08-06.html"
+
+        generar_nombre_archivo_analisis("Tour de France", "Tour de France - Etapa 1", "2026-07-04", "pdf")
+        -> "Analisis_Tour_de_France_Etapa_1_2026-07-04.pdf"
+    """
+    # 1. Normalizar fecha a formato YYYY-MM-DD
+    fecha_str = ""
+    if isinstance(fecha, datetime):
+        fecha_str = fecha.strftime("%Y-%m-%d")
+    elif fecha:
+        f_clean = str(fecha).strip()
+        m = re.search(r'\d{4}-\d{2}-\d{2}', f_clean)
+        if m:
+            fecha_str = m.group(0)
+        else:
+            fecha_str = limpiar_slug_archivo(f_clean)
+    if not fecha_str:
+        fecha_str = datetime.now().strftime("%Y-%m-%d")
+
+    # 2. Normalizar nombre_vuelta
+    vuelta_slug = limpiar_slug_archivo(nombre_vuelta) if nombre_vuelta else ""
+
+    # 3. Normalizar titulo
+    titulo_slug = ""
+    if titulo:
+        t_temp = str(titulo).strip()
+        # Si el título contiene la fecha, removerla para evitar duplicarla al final
+        if fecha_str:
+            t_temp = t_temp.replace(fecha_str, "").strip()
+        t_slug = limpiar_slug_archivo(t_temp)
+        
+        # Si el título empieza con el nombre de la vuelta, remover el prefijo redundante
+        if vuelta_slug and t_slug.lower().startswith(vuelta_slug.lower()):
+            t_slug = t_slug[len(vuelta_slug):].strip('_')
+        
+        titulo_slug = t_slug or "Etapa"
+    else:
+        titulo_slug = "Etapa"
+
+    # 4. Construir las partes en orden exacto: Analisis_{nombrevuelta}_{titulo}_{fecha}
+    partes = ["Analisis"]
+    if vuelta_slug:
+        partes.append(vuelta_slug)
+    if titulo_slug:
+        # Evitar duplicar si titulo_slug es idéntico a vuelta_slug
+        if not vuelta_slug or titulo_slug.lower() != vuelta_slug.lower():
+            partes.append(titulo_slug)
+    partes.append(fecha_str)
+
+    nombre_base = "_".join(partes)
+
+    if extension:
+        ext = extension if extension.startswith(".") else f".{extension}"
+        return f"{nombre_base}{ext}"
+    return nombre_base
+
+
 def generar_dashboard_perfil_interactivo(
     archivos_o_datos: Optional[List[Union[str, Path, Dict[str, Any]]]] = None,
     roster_df: Optional[pd.DataFrame] = None,
@@ -8376,7 +8456,15 @@ def generar_dashboard_perfil_interactivo(
             nom = c['stats'].get('nombre', '')
             c['wellness_load'] = wellness_carga_map.get(aid) or wellness_carga_map.get(nom) or {}
 
-        out_path = Path(output_html or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.html"))
+        # Resolver nombre de vuelta y fichero estandarizado: Analisis_{nombrevuelta}_{titulo}_{fecha}
+        _carrera_nom_bio = carrera_info.get('nombre_carrera') if carrera_info else (carrera_id or (f"Carrera {grupo_carrera}" if grupo_carrera else None))
+        _nombre_fichero_bio = generar_nombre_archivo_analisis(
+            nombre_vuelta=_carrera_nom_bio,
+            titulo=titulo or "Biometria",
+            fecha=fecha_etapa
+        )
+
+        out_path = Path(output_html or (OUTPUT_DIR / f"{_nombre_fichero_bio}.html"))
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # HTML mínimo informativo (sin mapa ni perfil)
         nombres_lista = ", ".join(c['stats']['nombre'] for c in ciclistas_proc_bio)
@@ -8395,7 +8483,7 @@ def generar_dashboard_perfil_interactivo(
 
         if debe_generar_pdf:
             try:
-                pdf_target = output_pdf or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.pdf")
+                pdf_target = output_pdf or (OUTPUT_DIR / f"{_nombre_fichero_bio}.pdf")
                 print(f"📄 Generando informe PDF de biometría en: {pdf_target}...")
                 ruta_pdf = generar_informe_etapa_pdf(
                     etapa_info=etapa_info_bio,
@@ -8410,7 +8498,7 @@ def generar_dashboard_perfil_interactivo(
 
         if debe_generar_docx:
             try:
-                docx_target = output_docx or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.docx")
+                docx_target = output_docx or (OUTPUT_DIR / f"{_nombre_fichero_bio}.docx")
                 print(f"📝 Generando documento Word de biometría en: {docx_target}...")
                 ruta_docx = generar_informe_etapa_word(
                     etapa_info=etapa_info_bio,
@@ -8644,15 +8732,14 @@ def generar_dashboard_perfil_interactivo(
         subtitulo_etapa=subtitulo_final
     )
 
-    # Slug del título para incluirlo en el nombre de fichero
-    _titulo_slug = unicodedata.normalize('NFKD', titulo_final).encode('ASCII', 'ignore').decode('utf-8')
-    _titulo_slug = re.sub(r'[\s\-/\\|]+', '_', _titulo_slug)          # espacios/guiones → _
-    _titulo_slug = re.sub(r'[^A-Za-z0-9_]', '', _titulo_slug)          # eliminar resto de especiales
-    _titulo_slug = re.sub(r'_+', '_', _titulo_slug).strip('_')          # colapsar _ dobles
-    _titulo_slug = _titulo_slug[:60]                                      # limitar longitud
-
-    _titulo_part = f"_{_slug_sufijo}" if _slug_sufijo else (f"_{_titulo_slug}" if _titulo_slug else "")
-    out_path = Path(output_html or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.html"))
+    # Nombre de fichero estandarizado: Analisis_{nombrevuelta}_{titulo}_{fecha}
+    _carrera_nom = carrera_info.get('nombre_carrera') if carrera_info else (carrera_id or (f"Carrera {grupo_carrera}" if grupo_carrera else None))
+    _nombre_fichero = generar_nombre_archivo_analisis(
+        nombre_vuelta=_carrera_nom,
+        titulo=titulo,
+        fecha=fecha_etapa
+    )
+    out_path = Path(output_html or (OUTPUT_DIR / f"{_nombre_fichero}.html"))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     
     with open(out_path, 'w', encoding='utf-8') as f:
@@ -8661,7 +8748,7 @@ def generar_dashboard_perfil_interactivo(
     # Generar también el informe ejecutivo en PDF
     if debe_generar_pdf:
         try:
-            pdf_target = output_pdf or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.pdf")
+            pdf_target = output_pdf or (OUTPUT_DIR / f"{_nombre_fichero}.pdf")
             print(f"📄 Generando informe PDF completo de la etapa en: {pdf_target}...")
             ruta_pdf = generar_informe_etapa_pdf(
                 etapa_info=etapa_info,
@@ -8677,7 +8764,7 @@ def generar_dashboard_perfil_interactivo(
     # Generar también el informe ejecutivo en Word (.docx)
     if debe_generar_docx:
         try:
-            docx_target = output_docx or (OUTPUT_DIR / f"etapa_{fecha_etapa}{_titulo_part}.docx")
+            docx_target = output_docx or (OUTPUT_DIR / f"{_nombre_fichero}.docx")
             print(f"📝 Generando documento Word completo de la etapa en: {docx_target}...")
             ruta_docx = generar_informe_etapa_word(
                 etapa_info=etapa_info,
@@ -8849,6 +8936,96 @@ def buscar_fit_local_ciclista(
             mejor_fit = f
 
     return mejor_fit
+
+
+def extraer_segundos_hora_dia(fecha_str_iso: Optional[str]) -> Optional[float]:
+    """
+    Extrae la hora del día en segundos transcurridos desde medianoche (0 a 86399)
+    a partir de una cadena de fecha/hora ISO o timestamp.
+    Ejemplo: '2026-08-06T12:30:15' -> 12*3600 + 30*60 + 15 = 45015.0
+    """
+    if not fecha_str_iso:
+        return None
+    try:
+        s = str(fecha_str_iso).strip()
+        if 'T' in s or ' ' in s:
+            partes = s.replace('T', ' ').split()
+            if len(partes) >= 2:
+                hora_part = partes[1].split('+')[0].split('-')[0].split('Z')[0]
+                hms = hora_part.split(':')
+                h = float(hms[0])
+                m = float(hms[1]) if len(hms) > 1 else 0.0
+                sec = float(hms[2]) if len(hms) > 2 else 0.0
+                return h * 3600.0 + m * 60.0 + sec
+        dt = pd.to_datetime(s)
+        return float(dt.hour * 3600 + dt.minute * 60 + dt.second)
+    except Exception:
+        return None
+
+
+def seleccionar_actividad_cercana_companeros(
+    acts_ciclista: List[Dict[str, Any]],
+    acts_companeros: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Dada una lista de actividades de un ciclista en una misma fecha, selecciona
+    aquella que más se aproxime en tiempo (hora de inicio y duración) y distancia
+    a la de sus compañeros de equipo.
+    
+    Si no hay actividades de referencia de compañeros o el ciclista solo tiene una,
+    devuelve la actividad con mayor distancia.
+    """
+    if not acts_ciclista:
+        return {}
+    if len(acts_ciclista) == 1:
+        return acts_ciclista[0]
+
+    # Extraer métricas de los compañeros
+    dists_comp = [float(a.get('distance') or 0.0) for a in acts_companeros if float(a.get('distance') or 0.0) > 0]
+    horas_comp = [extraer_segundos_hora_dia(a.get('start_date_local') or a.get('start_date')) for a in acts_companeros]
+    horas_comp = [h for h in horas_comp if h is not None]
+    durs_comp = [
+        float(a.get('moving_time') or a.get('elapsed_time') or 0.0)
+        for a in acts_companeros
+        if float(a.get('moving_time') or a.get('elapsed_time') or 0.0) > 0
+    ]
+
+    # Si no hay compañeros para comparar, fallback a la de mayor distancia
+    if not dists_comp and not horas_comp:
+        return max(acts_ciclista, key=lambda x: (float(x.get('distance') or 0.0), str(x.get('start_date_local') or '')))
+
+    ref_dist = float(np.median(dists_comp)) if dists_comp else 0.0
+    ref_hora = float(np.median(horas_comp)) if horas_comp else None
+    ref_dur = float(np.median(durs_comp)) if durs_comp else 0.0
+
+    mejor_act = None
+    menor_score = float('inf')
+
+    for act in acts_ciclista:
+        act_dist = float(act.get('distance') or 0.0)
+        act_hora = extraer_segundos_hora_dia(act.get('start_date_local') or act.get('start_date'))
+        act_dur = float(act.get('moving_time') or act.get('elapsed_time') or 0.0)
+
+        # 1. Error de distancia (adimensional, normalizado por la distancia de referencia)
+        err_dist = abs(act_dist - ref_dist) / max(ref_dist, 1000.0) if ref_dist > 0 else 0.0
+
+        # 2. Error de hora de inicio (en horas de diferencia)
+        err_hora = (abs(act_hora - ref_hora) / 3600.0) if (act_hora is not None and ref_hora is not None) else 0.0
+
+        # 3. Error de duración (adimensional)
+        err_dur = abs(act_dur - ref_dur) / max(ref_dur, 60.0) if ref_dur > 0 else 0.0
+
+        # Puntuación combinada (menor es mejor)
+        score = err_dist + err_hora + 0.5 * err_dur
+
+        if score < menor_score:
+            menor_score = score
+            mejor_act = act
+        elif score == menor_score:
+            if act_dist > float(mejor_act.get('distance') or 0.0):
+                mejor_act = act
+
+    return mejor_act or acts_ciclista[0]
 
 
 def descargar_o_recopilar_fits_etapa(
@@ -9035,7 +9212,9 @@ def descargar_o_recopilar_fits_etapa(
 
     rango_carrera_tupla = (str(carrera_info['fecha_inicio']), str(carrera_info['fecha_fin'])) if carrera_info and carrera_info.get('fecha_inicio') and carrera_info.get('fecha_fin') else None
 
-    # 3. Descargar las actividades de la fecha seleccionada para cada ciclista
+    # 3. Recopilar y seleccionar las actividades de la fecha seleccionada para cada ciclista
+    # Paso 3.1: Obtener todas las actividades de ciclismo de cada ciclista
+    actividades_por_ciclista: List[Dict[str, Any]] = []
     for a in atletas:
         aid = str(a.get('athlete_id', '')).strip()
         name = a.get('athlete_name', f"Atleta_{aid}")
@@ -9052,12 +9231,72 @@ def descargar_o_recopilar_fits_etapa(
             if tipo in ['Ride', 'VirtualRide'] or dist > 2000 or src == 'STRAVA':
                 acts_ciclismo.append(act)
 
-        if not acts_ciclismo:
-            continue
+        if acts_ciclismo:
+            actividades_por_ciclista.append({
+                'atleta': a,
+                'aid': aid,
+                'name': name,
+                'peso': peso_atleta,
+                'ftp': ftp_atleta,
+                'carrera': es_carrera_atleta,
+                'acts': acts_ciclismo
+            })
 
-        # Ordenar por distancia y hora de inicio dentro del mismo día para tomar la etapa principal
-        acts_ciclismo.sort(key=lambda x: (x.get('distance') or 0, x.get('start_date_local') or ''), reverse=True)
-        act_sel = acts_ciclismo[0]
+    # Paso 3.2: Establecer actividades de referencia inicial y resolver para ciclistas con múltiples actividades
+    actividades_ref_inicial = {}
+    for item in actividades_por_ciclista:
+        aid_it = item['aid']
+        acts_it = item['acts']
+        if len(acts_it) == 1:
+            actividades_ref_inicial[aid_it] = acts_it[0]
+        else:
+            actividades_ref_inicial[aid_it] = max(
+                acts_it,
+                key=lambda x: (float(x.get('distance') or 0.0), str(x.get('start_date_local') or ''))
+            )
+
+    ciclistas_con_act_seleccionada = []
+    for item in actividades_por_ciclista:
+        aid_it = item['aid']
+        name_it = item['name']
+        acts_it = item['acts']
+        carrera_grp = item['carrera']
+
+        if len(acts_it) == 1:
+            act_sel = acts_it[0]
+        else:
+            # Compañeros del mismo grupo (o de todo el equipo si no hay grupos separados)
+            comp_mismo_grupo = [
+                actividades_ref_inicial[other['aid']]
+                for other in actividades_por_ciclista
+                if other['aid'] != aid_it and (carrera_grp == 0 or other['carrera'] == carrera_grp or len({x['carrera'] for x in actividades_por_ciclista}) <= 1)
+            ]
+            if not comp_mismo_grupo:
+                comp_mismo_grupo = [
+                    actividades_ref_inicial[other['aid']]
+                    for other in actividades_por_ciclista
+                    if other['aid'] != aid_it
+                ]
+
+            act_sel = seleccionar_actividad_cercana_companeros(acts_it, comp_mismo_grupo)
+
+            dist_sel_km = round(float(act_sel.get('distance') or 0.0) / 1000.0, 1)
+            hora_sel = str(act_sel.get('start_date_local') or '')[11:16] or '--:--'
+            dists_comp_km = [round(float(c.get('distance') or 0.0) / 1000.0, 1) for c in comp_mismo_grupo]
+            ref_km = round(float(np.median(dists_comp_km)), 1) if dists_comp_km else dist_sel_km
+            print(f"   🚴 {name_it}: Detectadas {len(acts_it)} actividades en la fecha {fecha_str}.")
+            print(f"      🎯 Seleccionada actividad ID {act_sel.get('id')} ('{act_sel.get('name') or 'Actividad'}'): {dist_sel_km} km, inicio {hora_sel} (cercanía a compañeros: ref ~{ref_km} km).")
+
+        ciclistas_con_act_seleccionada.append((item, act_sel))
+
+    # Paso 3.3: Descargar Streams limpios o archivos FIT para las actividades seleccionadas
+    for item, act_sel in ciclistas_con_act_seleccionada:
+        aid = item['aid']
+        name = item['name']
+        peso_atleta = item['peso']
+        ftp_atleta = item['ftp']
+        es_carrera_atleta = item['carrera']
+
         act_id = str(act_sel.get('id', ''))
         source = str(act_sel.get('source', '')).upper()
 

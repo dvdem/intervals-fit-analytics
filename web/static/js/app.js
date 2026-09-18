@@ -152,6 +152,7 @@ function navigateToTab(tabId) {
   if (tabId === 'tab-admin') {
     loadAthletesAdmin();
     loadRacesAdmin();
+    loadCacheStatus();
   }
   if (tabId === 'tab-users') {
     loadUsersAdminTable();
@@ -2863,6 +2864,85 @@ async function deleteUserPrompt(username) {
 }
 
 // =============================================================================
+// MÓDULO: GESTIÓN DE CACHÉ DE CÁLCULOS
+// =============================================================================
+
+async function loadCacheStatus() {
+  try {
+    const res = await fetch('/api/cache/status');
+    if (!res.ok) return;
+    const data = await res.json();
+
+    // Telemetría FIT
+    const catFits = data.categorias?.fits || {};
+    setElemText('cache-stat-fits-count', catFits.num_archivos || 0);
+    setElemText('cache-stat-fits-size', `${catFits.tamano_str || '0 B'} (today_race)`);
+
+    // Clima
+    const catWeather = data.categorias?.clima || {};
+    setElemText('cache-stat-weather-count', catWeather.num_archivos || 0);
+    setElemText('cache-stat-weather-size', `${catWeather.tamano_str || '0 B'} (Open-Meteo)`);
+
+    // Picos y fatiga
+    const catPeaks = data.categorias?.picos || {};
+    setElemText('cache-stat-peaks-count', catPeaks.num_actividades || 0);
+    setElemText('cache-stat-peaks-size', `${catPeaks.tamano_str || '0 B'} (histórico)`);
+
+    // Total
+    setElemText('cache-stat-total-size', data.total_tamano_str || '0 B');
+    setElemText('cache-stat-total-files', `${data.total_archivos || 0} archivos temporales`);
+  } catch (err) {
+    console.warn('Error al cargar estado de la caché:', err);
+  }
+}
+
+async function handleClearCache() {
+  const confirmMsg = '¿Deseas vaciar todos los archivos de caché generados durante los cálculos?\n\n' +
+    '• Se eliminarán los archivos FIT temporales locales (today_race).\n' +
+    '• Se eliminarán las consultas meteorológicas en caché (weather_cache).\n' +
+    '• Se reseteará la caché de picos históricos y fatiga previa (kJ).\n\n' +
+    'Nota: La base de datos histórica y la lista de ciclistas NO se verán afectadas.';
+
+  if (!confirm(confirmMsg)) return;
+
+  const btn = document.getElementById('btn-clear-cache');
+  const originalText = btn ? btn.innerHTML : '';
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span>⏳</span> Limpiando...';
+  }
+
+  try {
+    showToast('Limpiando archivos de caché de cálculo...', 'info');
+    const res = await fetch('/api/cache/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        limpiar_fits: true,
+        limpiar_clima: true,
+        limpiar_picos: true,
+        limpiar_scratch: true
+      })
+    });
+
+    const data = await res.json();
+    if (res.ok) {
+      showToast(data.mensaje || 'Caché eliminada con éxito', 'success');
+      await loadCacheStatus();
+    } else {
+      showToast(data.detail || 'Error al vaciar la caché', 'error');
+    }
+  } catch (err) {
+    showToast('Error de conexión al vaciar la caché', 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = originalText;
+    }
+  }
+}
+
+// =============================================================================
 // INICIALIZACIÓN AL CARGAR LA PÁGINA
 // =============================================================================
 
@@ -2926,6 +3006,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-close-up-modal')?.addEventListener('click', closeChangePasswordModal);
   document.getElementById('btn-cancel-up-modal')?.addEventListener('click', closeChangePasswordModal);
   document.getElementById('form-change-password')?.addEventListener('submit', handleChangePasswordSubmit);
+
+  // Botones de mantenimiento de caché de cálculos
+  document.getElementById('btn-refresh-cache-status')?.addEventListener('click', () => {
+    loadCacheStatus();
+    showToast('Estado de caché actualizado', 'info', 2000);
+  });
+  document.getElementById('btn-clear-cache')?.addEventListener('click', handleClearCache);
 
   // 1. Verificar autenticación obligatoria y cargar perfil
   const authOk = await initAuthAndUser();

@@ -453,15 +453,21 @@ class TestWebAPI(unittest.TestCase):
         """Verifica que al generar un perfil de etapa se sobreescriba si ya existe uno de la misma fecha/carrera."""
         from unittest.mock import patch
         from config import OUTPUT_DIR
+        from src.interactive_profile import generar_nombre_archivo_analisis
 
         test_date = "2026-08-06"
         carrera_id = "test_carrera_overwrite"
-        target_html = OUTPUT_DIR / f"perfil_interactivo_{test_date}_{carrera_id}.html"
-        old_timestamped = OUTPUT_DIR / f"perfil_interactivo_{test_date}_{carrera_id}_20260806_112233.html"
+        base_name = generar_nombre_archivo_analisis(
+            nombre_vuelta=carrera_id.replace('_', ' ').title(),
+            titulo="Test Overwrite",
+            fecha=test_date
+        )
+        target_html = OUTPUT_DIR / f"{base_name}.html"
+        old_legacy = OUTPUT_DIR / f"perfil_interactivo_{test_date}_{carrera_id}.html"
 
         # Crear archivos previos de prueba
         target_html.write_text("contenido viejo", encoding="utf-8")
-        old_timestamped.write_text("timestamped viejo", encoding="utf-8")
+        old_legacy.write_text("legacy viejo", encoding="utf-8")
 
         def fake_generar(output_html, **kwargs):
             Path(output_html).write_text("contenido nuevo sobreescrito", encoding="utf-8")
@@ -478,8 +484,8 @@ class TestWebAPI(unittest.TestCase):
             res = self.client.post("/api/stage/analyze", json=payload)
             self.assertEqual(res.status_code, 200)
 
-        # Verificar que el viejo timestamped fue eliminado
-        self.assertFalse(old_timestamped.exists())
+        # Verificar que el viejo legacy fue eliminado
+        self.assertFalse(old_legacy.exists())
         # Verificar que el target principal fue sobreescrito con el nuevo contenido
         self.assertTrue(target_html.exists())
         self.assertEqual(target_html.read_text(encoding="utf-8"), "contenido nuevo sobreescrito")
@@ -487,8 +493,32 @@ class TestWebAPI(unittest.TestCase):
         # Limpiar
         if target_html.exists():
             target_html.unlink()
-        if old_timestamped.exists():
-            old_timestamped.unlink()
+        if old_legacy.exists():
+            old_legacy.unlink()
+
+    def test_generar_nombre_archivo_analisis_format(self):
+        """Valida que los nombres de archivo generados cumplan Analisis_{nombrevuelta}_{titulo}_{fecha}."""
+        from src.interactive_profile import generar_nombre_archivo_analisis
+
+        # 1. Vuelta a Burgos, Etapa 2
+        name = generar_nombre_archivo_analisis("Vuelta a Burgos", "Etapa 2", "2026-08-06", "html")
+        self.assertEqual(name, "Analisis_Vuelta_a_Burgos_Etapa_2_2026-08-06.html")
+
+        # 2. PDF con acentos y caracteres especiales
+        name_pdf = generar_nombre_archivo_analisis("Vuelta a España", "Etapa 1: Alcalá / Madrid", "2026-09-10", "pdf")
+        self.assertEqual(name_pdf, "Analisis_Vuelta_a_Espana_Etapa_1_Alcala_Madrid_2026-09-10.pdf")
+
+        # 3. Título que repite el nombre de la vuelta al inicio
+        name_dup = generar_nombre_archivo_analisis("Tour de France", "Tour de France - Etapa 14", "2026-07-15", "docx")
+        self.assertEqual(name_dup, "Analisis_Tour_de_France_Etapa_14_2026-07-15.docx")
+
+        # 4. Sin vuelta explícita
+        name_no_race = generar_nombre_archivo_analisis(None, "Entrenamiento Fondo", "2026-08-06", "html")
+        self.assertEqual(name_no_race, "Analisis_Entrenamiento_Fondo_2026-08-06.html")
+
+        # 5. Sin título explícito
+        name_no_title = generar_nombre_archivo_analisis("Giro d'Italia", None, "2026-05-15", "html")
+        self.assertEqual(name_no_title, "Analisis_Giro_d_Italia_Etapa_2026-05-15.html")
 
     def test_guardar_resumen_etapa_overwrites_same_date(self):
         """Verifica que guardar_resumen_etapa sobreescriba actividades previas del mismo ciclista y fecha."""
@@ -538,6 +568,39 @@ class TestWebAPI(unittest.TestCase):
             conn.execute("DELETE FROM etapas_resumen WHERE atleta_id = ?;", (test_ath,))
             conn.execute("DELETE FROM ciclistas WHERE atleta_id = ?;", (test_ath,))
             conn.commit()
+
+    def test_cache_status_endpoint(self):
+        """Verifica la consulta del estado de la caché de cálculo."""
+        response = self.client.get("/api/cache/status")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("total_archivos", data)
+        self.assertIn("total_bytes", data)
+        self.assertIn("total_tamano_str", data)
+        self.assertIn("categorias", data)
+        self.assertIn("fits", data["categorias"])
+        self.assertIn("clima", data["categorias"])
+
+    def test_cache_clear_endpoint(self):
+        """Verifica el endpoint de vaciado de caché con rol administrador."""
+        response = self.client.post("/api/cache/clear", json={
+            "limpiar_fits": True,
+            "limpiar_clima": True,
+            "limpiar_picos": True,
+            "limpiar_scratch": True
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("archivos_eliminados", data)
+        self.assertIn("bytes_liberados", data)
+
+    def test_cache_clear_unauthorized(self):
+        """Verifica que un cliente no autenticado no pueda vaciar la caché."""
+        from fastapi.testclient import TestClient
+        anon_client = TestClient(app)
+        response = anon_client.post("/api/cache/clear", json={})
+        self.assertEqual(response.status_code, 401)
 
 
 if __name__ == "__main__":

@@ -574,6 +574,52 @@
             </table>
           </div>
         </div>
+
+        <!-- Tarjeta de Mantenimiento y Caché de Cálculos -->
+        <div class="panel" style="margin-top: 24px;">
+          <div class="panel-header">
+            <div>
+              <h2 class="panel-title"><span>⚡</span> Mantenimiento del Sistema y Caché de Cálculos</h2>
+              <p style="font-size: 0.84rem; color: var(--text-muted); margin: 4px 0 0 0;">
+                Supervisa y vacía los ficheros temporales y cachés generadas durante los cálculos (telemetría FIT local, clima Open-Meteo y picos históricos). La base de datos y la configuración del equipo permanecen siempre intactas.
+              </p>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button class="btn btn-secondary btn-sm" id="btn-refresh-cache-status" title="Actualizar estado de la caché">
+                <span>🔄</span> Actualizar
+              </button>
+              <button class="btn btn-danger btn-sm" id="btn-clear-cache" title="Eliminar todos los ficheros de caché de cálculo">
+                <span>🧹</span> Vaciar Caché de Cálculos
+              </button>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-top: 16px;">
+            <div class="kpi-card" style="border-left: 4px solid var(--accent-orange, #f59e0b);">
+              <div class="kpi-label">Telemetría FIT en Cola</div>
+              <div class="kpi-value" id="cache-stat-fits-count">0</div>
+              <div class="kpi-subtext" id="cache-stat-fits-size">0 KB (today_race)</div>
+            </div>
+
+            <div class="kpi-card" style="border-left: 4px solid var(--accent-blue, #3b82f6);">
+              <div class="kpi-label">Caché Meteorológica</div>
+              <div class="kpi-value" id="cache-stat-weather-count">0</div>
+              <div class="kpi-subtext" id="cache-stat-weather-size">0 KB (Open-Meteo)</div>
+            </div>
+
+            <div class="kpi-card" style="border-left: 4px solid var(--accent-purple, #8b5cf6);">
+              <div class="kpi-label">Picos y Fatiga (kJ)</div>
+              <div class="kpi-value" id="cache-stat-peaks-count">0</div>
+              <div class="kpi-subtext" id="cache-stat-peaks-size">0 KB (histórico)</div>
+            </div>
+
+            <div class="kpi-card" style="border-left: 4px solid var(--accent-green, #10b981);">
+              <div class="kpi-label">Espacio Total en Caché</div>
+              <div class="kpi-value" id="cache-stat-total-size">0 KB</div>
+              <div class="kpi-subtext" id="cache-stat-total-files">0 archivos temporales</div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ===================================================================

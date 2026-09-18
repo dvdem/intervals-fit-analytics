@@ -99,7 +99,13 @@ from src.word_reports import (
 )
 from src.interactive_profile import (
     generar_dashboard_perfil_interactivo,
-    descargar_o_recopilar_fits_etapa
+    descargar_o_recopilar_fits_etapa,
+    generar_nombre_archivo_analisis,
+    limpiar_slug_archivo
+)
+from src.cache_manager import (
+    obtener_estado_cache,
+    limpiar_cache_calculos
 )
 
 # Inicializar Base de Datos
@@ -227,6 +233,13 @@ class RaceGroupUpdateRequest(BaseModel):
     total_etapas: Optional[int] = 5
     etapa_actual: Optional[int] = 1
     notas: Optional[str] = ""
+
+
+class CacheClearRequest(BaseModel):
+    limpiar_fits: bool = True
+    limpiar_clima: bool = True
+    limpiar_picos: bool = True
+    limpiar_scratch: bool = True
 
 
 def _calcular_metricas_grupo_carrera(
@@ -1415,10 +1428,14 @@ def list_stages_available(current_user: Dict[str, Any] = Depends(get_current_use
     # 1. Buscar HTMLs generados en output/
     html_files = []
     for f in OUTPUT_DIR.glob("*.html"):
-        if "perfil" in f.name.lower() or "etapa" in f.name.lower() or "stage" in f.name.lower():
+        name_lower = f.name.lower()
+        if any(k in name_lower for k in ["analisis", "analysis", "perfil", "etapa", "stage"]):
+            display_title = f.stem.replace('_', ' ')
+            if display_title.lower().startswith("analisis "):
+                display_title = display_title[9:].strip()
             html_files.append({
                 "filename": f.name,
-                "title": f.stem.replace('_', ' ').title(),
+                "title": display_title.title(),
                 "created_at": datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
                 "view_url": f"/view-profile/{f.name}"
             })
@@ -1457,18 +1474,25 @@ def analyze_stage(payload: StageAnalyzeRequest, current_user: Dict[str, Any] = D
     fecha_str = payload.fecha or datetime.now().strftime("%Y-%m-%d")
     titulo_base = payload.titulo
 
-    # Resolver carrera_id prioritario si viene carrera_id o grupo_carrera
+    # Resolver carrera_id y nombre de vuelta prioritario si viene carrera_id o grupo_carrera
     carrera_target = payload.carrera_id
+    nombre_vuelta = None
     if not carrera_target and payload.grupo_carrera is not None and str(payload.grupo_carrera) != 'todos':
         c_res = resolver_carrera(payload.grupo_carrera, fecha=fecha_str)
         if c_res:
             carrera_target = c_res['carrera_id']
+            nombre_vuelta = c_res.get('nombre_carrera')
             if not titulo_base:
                 titulo_base = c_res['nombre_carrera']
     elif carrera_target:
         c_res = resolver_carrera(carrera_target, fecha=fecha_str)
-        if c_res and not titulo_base:
-            titulo_base = c_res['nombre_carrera']
+        if c_res:
+            nombre_vuelta = c_res.get('nombre_carrera')
+            if not titulo_base:
+                titulo_base = c_res['nombre_carrera']
+
+    if not nombre_vuelta and carrera_target:
+        nombre_vuelta = carrera_target.replace('_', ' ').title()
 
     if not titulo_base:
         titulo_base = f"Etapa {fecha_str}"
@@ -1490,18 +1514,32 @@ def analyze_stage(payload: StageAnalyzeRequest, current_user: Dict[str, Any] = D
     if not fit_paths:
         raise HTTPException(status_code=404, detail=f"No se encontraron actividades ni archivos FIT para la fecha '{fecha_str}'.")
 
-    # Generar el perfil interactivo HTML (sobreescribiendo si ya existe uno de la misma fecha y carrera)
-    slug_file = f"_{carrera_target}" if carrera_target else ""
-    out_html = OUTPUT_DIR / f"perfil_interactivo_{fecha_str}{slug_file}.html"
-    out_pdf = OUTPUT_DIR / f"informe_etapa_{fecha_str}{slug_file}.pdf" if payload.generar_pdf else None
-    out_docx = OUTPUT_DIR / f"informe_etapa_{fecha_str}{slug_file}.docx" if payload.generar_docx else None
+    # Generar el nombre de archivo estandarizado: Analisis_{nombrevuelta}_{titulo}_{fecha}
+    titulo_etapa = payload.titulo or ("Etapa" if nombre_vuelta else titulo_base)
+    base_filename = generar_nombre_archivo_analisis(
+        nombre_vuelta=nombre_vuelta,
+        titulo=titulo_etapa,
+        fecha=fecha_str
+    )
+    out_html = OUTPUT_DIR / f"{base_filename}.html"
+    out_pdf = OUTPUT_DIR / f"{base_filename}.pdf" if payload.generar_pdf else None
+    out_docx = OUTPUT_DIR / f"{base_filename}.docx" if payload.generar_docx else None
 
     # Sobreescribir cualquier versión previa de la misma fecha y carrera (incluyendo archivos con timestamp)
+    slug_file = f"_{carrera_target}" if carrera_target else ""
     patrones_limpieza = [
+        f"*{base_filename}*",
         f"*perfil_interactivo_{fecha_str}{slug_file}*",
         f"*informe_etapa_{fecha_str}{slug_file}*",
         f"*etapa_{fecha_str}{slug_file}*"
     ]
+    if nombre_vuelta:
+        vuelta_slug = limpiar_slug_archivo(nombre_vuelta)
+        patrones_limpieza.append(f"*Analisis_{vuelta_slug}*{fecha_str}*")
+    elif carrera_target:
+        c_slug = limpiar_slug_archivo(carrera_target)
+        patrones_limpieza.append(f"*Analisis_{c_slug}*{fecha_str}*")
+
     for patron in patrones_limpieza:
         for old_f in OUTPUT_DIR.glob(patron):
             if old_f.resolve() not in [out_html.resolve(), (out_pdf.resolve() if out_pdf else None), (out_docx.resolve() if out_docx else None)]:
@@ -1609,6 +1647,29 @@ def trigger_sync(
 def get_sync_status(current_user: Dict[str, Any] = Depends(get_current_user)):
     """Devuelve el estado de la tarea de sincronización."""
     return _SYNC_STATUS
+
+
+@app.get("/api/cache/status")
+def get_cache_status(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Devuelve el estado, número de archivos y peso en disco de las cachés de cálculo."""
+    return obtener_estado_cache()
+
+
+@app.post("/api/cache/clear")
+def clear_calculation_cache(
+    payload: Optional[CacheClearRequest] = None,
+    current_user: Dict[str, Any] = Depends(require_role([ROL_ADMINISTRADOR, ROL_EDITOR]))
+):
+    """Limpia los archivos de caché utilizados durante los cálculos."""
+    if payload is None:
+        payload = CacheClearRequest()
+    res = limpiar_cache_calculos(
+        limpiar_fits=payload.limpiar_fits,
+        limpiar_clima=payload.limpiar_clima,
+        limpiar_picos=payload.limpiar_picos,
+        limpiar_scratch=payload.limpiar_scratch
+    )
+    return res
 
 
 @app.get("/api/download/{folder}/{filename}")
